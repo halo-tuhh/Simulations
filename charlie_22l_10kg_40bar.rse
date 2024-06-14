@@ -1,0 +1,19 @@
+<engine-database>
+ <engine-list>
+<engine FDiv="10" FFix="1" FStep="-1." Isp="8.0" Itot="893.44" Type="single-use" auto-calc-cg="1" auto-calc-mass="0" avgThrust="131" burn-time="6.58" cgDiv="10" cgFix="1" cgStep="-1." code="charlie_22l_10kg_40bar" delays="6,10,14" dia="125." exitDia="7.5" initWt="10000." len="850" mDiv="10" mFix="1" mStep="-1." massFrac="inf" mfg="Custom" peakThrust="347.68" propWt="10000" tDiv="10" tFix="1" tStep="-1." throatDia="7.5">
+<data>
+<eng-data cg="850" f="0." m="10000" t="0.0"/>
+<eng-data cg="850" f="347.68" m="10000" t="0.01"/>
+<eng-data cg="552" f="238.4" m="5000" t="1.0"/>
+<eng-data cg="340" f="185.6" m="3000" t="2.0"/>
+<eng-data cg="170" f="150" m="1500" t="3.0"/>
+<eng-data cg="127" f="92" m="1000" t="3.3"/>
+<eng-data cg="85" f="62" m="500" t="4.0"/>
+<eng-data cg="42" f="38" m="300" t="5.0"/>
+<eng-data cg="21" f="24" m="200" t="6.0"/>
+<eng-data cg="9" f="12" m="100" t="7.0"/>
+<eng-data cg="4" f="7" m="50" t="8.0"/>
+</data>
+</engine>
+ </engine-list>
+</engine-database>
