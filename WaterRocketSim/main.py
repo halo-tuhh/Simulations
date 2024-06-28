@@ -1,3 +1,10 @@
+import math
+import platform
+import ctypes
+import os
+
+os.environ['TK_SILENCE_DEPRECATION'] = '1'
+
 from tkinter import *
 from tkinter.ttk import *
 from tkinter.font import *
@@ -8,9 +15,9 @@ matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-import math
-import ctypes
-ctypes.windll.shcore.SetProcessDpiAwareness(1)
+
+if platform.system() == "Windows":
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
 
 def A(z):
     global rtank, rnozzle, ltaper, height_water_tank
@@ -234,7 +241,7 @@ def setylimit():
 root = Tk()
 root.title("WaterRocketSim")
 
-default_font = tkinter.font.nametofont("TkDefaultFont")
+default_font = nametofont("TkDefaultFont")
 default_font.configure(size=12)
 root.option_add("*Font", default_font)
 
