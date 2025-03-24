@@ -14,9 +14,9 @@ prop_density = 998;
 pres_pressure = 60 * 1e5;
 pres_temp = 293;
 pres_gamma = 1.4; % air 
-pres_gamma = 1.29; % co2
+% pres_gamma = 1.29; % co2
 pres_R = 287; % air
-pres_R = 189; % co2
+% pres_R = 189; % co2
 
 
 %%% constants

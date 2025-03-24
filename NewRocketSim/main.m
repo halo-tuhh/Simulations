@@ -15,12 +15,22 @@ for i = 1:length(sol_x)
     sol_pressure(i) = pressure(sol_x(i,3));
     [~, thrust] = flow(sol_x(i,3));
     sol_thrust(i) = thrust;
-    sol_accel(i) = thrust / (sol_x(i,3)+rocket_mass) / g - 1 ;
+    sol_accel(i) = thrust / (sol_x(i,3)+rocket_mass) / g - 1;
 end
 
-apogee = max(sol_x(:,1))
-max_vel = max(sol_x(:,2))
-max_accel = max(sol_accel)
+
+apogee = max(sol_x(:,1));
+max_vel = max(sol_x(:,2));
+max_accel = max(sol_accel);
+impulse = trapz(sol_t, sol_thrust);
+isp = impulse / (prop_mass + pres_mass) / g;
+max_thrust = max(sol_thrust);
+
+disp(['  Apogee     ', 'v_max     ', 'G_max  '])
+disp([apogee, max_vel, max_accel])
+disp(['  Impulse    ', 'ISP      ', 'T_max  '])
+disp([impulse, isp, max_thrust])
+
 
 figure(1)
 subplot(2,3,1)
