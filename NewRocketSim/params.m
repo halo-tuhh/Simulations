@@ -13,15 +13,16 @@ prop_density = 998;
 %%% Pressurant
 pres_pressure = 60 * 1e5;
 pres_temp = 293;
-pres_gamma = 1.4;
-pres_R = 287;
+pres_gamma = 1.4; % air 
+pres_gamma = 1.29; % co2
+pres_R = 287; % air
+pres_R = 189; % co2
 
 
 %%% constants
 g = 9.81;
 atmos_pressure = 1e5;
 atmos_density = 1.2;
-atmos_temp = 293;
 
 %% calcs
 nozzle_area = pi*nozzle_radius^2;

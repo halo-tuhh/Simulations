@@ -5,34 +5,48 @@ params
 x_init = [0; 0; prop_mass+pres_mass];
 
 tspan = 0:0.01:30; 
-opts = odeset('Events', @stopping); 
+opts = odeset('Events', @stopping_vel); 
 [sol_t, sol_x, te, ~] = ode45(@(t_,x_)eom(t_,x_), tspan, x_init, opts);
 
 sol_pressure = 0;
+sol_thrust = 0;
+sol_accel = 0;
 for i = 1:length(sol_x)
     sol_pressure(i) = pressure(sol_x(i,3));
+    [~, thrust] = flow(sol_x(i,3));
+    sol_thrust(i) = thrust;
+    sol_accel(i) = thrust / (sol_x(i,3)+rocket_mass) / g - 1 ;
 end
 
 apogee = max(sol_x(:,1))
 max_vel = max(sol_x(:,2))
+max_accel = max(sol_accel)
 
 figure(1)
-subplot(2,2,1)
+subplot(2,3,1)
 plot(sol_t, sol_x(:,1));
 xlabel('Time, [s]')
 ylabel('Altitude, [m]')
-subplot(2,2,2)
+subplot(2,3,2)
 plot(sol_t, sol_x(:,2));
 xlabel('Time, [s]')
 ylabel('Velocity, [m/s]')
-subplot(2,2,3)
+subplot(2,3,3)
+plot(sol_t, sol_accel);
+xlabel('Time, [s]')
+ylabel('Acceleration, [g]')
+subplot(2,3,4)
 plot(sol_t, rocket_mass+sol_x(:,3));
 xlabel('Time, [s]')
 ylabel('Mass, [kg]')
-subplot(2,2,4)
+subplot(2,3,5)
 plot(sol_t, sol_pressure);
 xlabel('Time, [s]')
 ylabel('Pressure, [Pa]')
+subplot(2,3,6)
+plot(sol_t, sol_thrust);
+xlabel('Time, [s]')
+ylabel('Thrust, [N]')
 
 %% calcs
 function [x_dot] = eom(t, x)
@@ -81,9 +95,16 @@ function [p] = pressure(m)
 end
 
 
-function [zero_alt, isterm, direct] = stopping(~,x)
+function [zero_alt, isterm, direct] = stopping_alt(~,x)
     params
     zero_alt = x(1);
+    isterm = 1;
+    direct = 0;
+end
+
+function [zero_vel, isterm, direct] = stopping_vel(~,x)
+    params
+    zero_vel = x(2)+0.001;
     isterm = 1;
     direct = 0;
 end
