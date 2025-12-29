@@ -9,6 +9,8 @@ Created on Sun Dec  7 19:20:42 2025
 # Propellants
 air_temp_celsius = 20 # deg C, surrounding air temp
 fuel_name = 'ethanol' # for fluid property lookup
+ox_ullage = 0.1 # fraction, liquid level fraction of tank
+
 
 # Tanks
 tank_ox_diam_out = 0.11 # m, oxidizer tank outer diameter
@@ -32,7 +34,7 @@ inj_fuel_cd = 0.63 # discharge coefficient fuel
 
 # Chamber
 chamber_diam = 0.05 # m, chamber inner diameter
-chamber_length = 0.1 # m, chamber inner diameter
+chamber_length = 0.1 # m, chamber length
 chamber_throat = 0.003 # m, nozzle throat diameter
 chamber_exit = 0.006 # m, nozzle exit diameter
 chamber_Cstar_overwrite = 0.8 # combustion efficiency overwrite
@@ -49,6 +51,8 @@ np.seterr(all='ignore')
 import scipy
 import matplotlib.pyplot as plt
 import sys
+import xml.etree.ElementTree as ET
+import CoolProp.CoolProp as CP
 from CoolProp.CoolProp import PropsSI as propsi
 import rocketcea
 from rocketcea.cea_obj import CEA_Obj 
@@ -72,6 +76,68 @@ air_temp = 273.15 + air_temp_celsius # K
 
 
 "Functions"
+
+# Tank thermodynamics
+def tank_init_eq(T0, Vtank, Vvap_fraction):
+    #m = y[0]
+    #U = y[1]
+    
+    rho_liq = propsi ("D", "T", T0, "Q", 0, "N2O")
+    rho_vap = propsi ("D", "T", T0, "Q", 1, "N2O")
+    m_liq = rho_liq * Vtank * (1-Vvap_fraction)
+    m_vap = rho_vap * Vtank * Vvap_fraction
+    
+    m = m_vap + m_liq   
+    #x = ( (rho_vap*rho_liq)*Vtank/m0 - rho_vap ) / (rho_liq-rho_vap)
+    x = m_vap / m
+    
+    T = T0
+    U = m * propsi ("U", "T", T0, "Q", x, "N2O")
+    T_liq = T
+    T_vap = T
+    
+    P = propsi ("P", "T", T0, "Q", x, "N2O")
+    
+    y = np.array([m, U, T_liq, T_vap])
+    info = np.array([P, m, x])
+    return y, info
+
+
+def tank_ode_eq(y):
+    #m = y[0]
+    #U = y[1]
+    T_liq = y
+    
+    m = 7
+    T = 290
+    U = m * propsi ("U", "T", T, "Q", 0, "N2O")
+    
+    def volume_constr(T_func): 
+        rho_liq = propsi ("D", "T", T_func, "Q", 0, "N2O")
+        rho_vap = propsi ("D", "T", T_func, "Q", 1, "N2O")
+        u_liq = propsi ("U", "T", T_func, "Q", 0, "N2O")
+        u_vap = propsi ("U", "T", T_func, "Q", 1, "N2O")
+        x = (U/m-u_liq) / (u_vap-u_liq)
+        #x = propsi ("Q", "T", T_func, "U", U/m, "N2O")
+        return m*((1-x)/rho_liq + x/rho_vap) - tank_ox_vol
+    T = scipy.optimize.root(volume_constr, T_liq).x[0]
+    #T = sol.
+    
+    #c_
+    
+    #dQ_in = 
+    
+    # dm = 0.0
+    # du = 0.0
+        
+    # P1 = propsi ("P", "T", T1, "U", U, "N2O")
+    # h = propsi ("H", "T", T1, "P", P1, "N2O")
+    # dm = injector_flow_ox_hem(T1, P1, P2)
+    # dU = - dm * h + dQ_in
+    
+    # ydot = np.array([dm, dU])
+    return T
+
 # Injector mass flow rates
 def injector_flow_ox_hem(T1, P1, P2):
     # Two-phase Homogeneous Equilibrium Model
@@ -94,15 +160,6 @@ def injector_flow_ox_hem(T1, P1, P2):
         mdot = flow(P2) 
     return  mdot 
 
-def injector_flow_ox_burnell(T1, P1, P2):
-    # Two-phase Frozen Non-Equilibrium Model (Burnell)
-    mdot = 0 # kg/s, mass flow rate
-    Pv = propsi ("P", "T", T1, "Q", 0, "N2O")
-    density = propsi ("D", "T", T1, "P", P1, "N2O")
-    C = -0.000000015267*Pv + 0.2279
-    mdot = inj_ox_cd * inj_ox_area * math.sqrt( 2*density*(Pv-Pv*(1-C)) )
-    return  mdot 
-
 def injector_flow_fuel_spi(T1, P1, P2):
     mdot = 0 # kg/s, mass flow rate
     density = propsi ("D", "T", T1, "P", P1, fuel_name)
@@ -111,19 +168,23 @@ def injector_flow_fuel_spi(T1, P1, P2):
 
 
 "Testing ground"
-T1 = 273.15
+T1 = 273.15 
 test_Pv = propsi ("P", "T", T1, "Q", 0, "N2O")
 test_ox_mdot_hem = injector_flow_ox_hem(T1, test_Pv+1E3, 2E6)
 test_fuel_mdot = injector_flow_fuel_spi(T1, test_Pv+1E3, 2E6)
 
-P2min = 0
-P2max = 8E6
-N = 100
-P2s = np.linspace(P2min, P2max, num=N)
-mdots = np.zeros(N)
-n = 0 
-while n < N :
-    mdots[n] = injector_flow_ox_hem(T1, test_Pv+1E3, P2s[n])
-    n += 1
-plt.figure(1)
-plt.plot(P2s, mdots)
+x = np.array([1.0, 2.0])
+y = 250
+#T = tank_init_eq(y)
+
+# P2min = 0
+# P2max = 4E6
+# N = 20
+# P2s = np.linspace(P2min, P2max, num=N)
+# mdots = np.zeros(N)
+# n = 0 
+# while n < N :
+#     mdots[n] = injector_flow_ox_hem(T1, test_Pv+1E3, P2s[n])
+#     n += 1
+# plt.figure(1)
+# plt.plot(P2s, mdots)
