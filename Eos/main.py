@@ -61,6 +61,8 @@ tank_ox_diam = tank_ox_diam_out - 2*tank_ox_thick # m, oxidizer tank inner diame
 tank_fuel_diam = tank_fuel_diam_out - 2*tank_fuel_thick # m, fuel tank inner diameter
 tank_fuel_vol = (tank_fuel_diam/2)**2*np.pi * tank_fuel_len # m^3, fuel tank volume
 tank_ox_vol = (tank_ox_diam/2)**2*np.pi * tank_ox_len - tank_fuel_vol# m^3, oxidizer tank volume
+tank_ox_mass = 2700 * tank_ox_diam*tank_ox_thick*tank_ox_len # kg, oxidizer tank mass
+tank_ox_heat = 910 # J/(kg K), specific heat of aluminium
 
 inj_ox_diam = inj_ox_diam_mm/1000
 inj_fuel_diam = inj_fuel_diam_mm/1000
@@ -96,7 +98,7 @@ def tank_init_eq(T0, Vtank, Vvap_fraction):
     P = propsi ("P", "T", T0, "Q", x, "N2O")
     
     #y = np.array([m, U, T_liq, T_vap])
-    y = np.array([m, u])
+    y = np.array([m, u, T])
     info = np.array([P, x, u])
     
     return y, info
@@ -135,9 +137,64 @@ def tank_ode_eq(t, y):
 
 
 
+def tank_ode_eq2(t, y):
+    m, u, Twall = y
+    ydot = np.array([0, 0, 0])
+    
+    if m < 0.1:
+        return ydot
+    
+    P_ch = 1e5
+    
+    def volume_constr(T_func): 
+        rho_liq = propsi ("D", "T", T_func, "Q", 0, "N2O")
+        rho_vap = propsi ("D", "T", T_func, "Q", 1, "N2O")
+        u_liq = propsi ("U", "T", T_func, "Q", 0, "N2O")
+        u_vap = propsi ("U", "T", T_func, "Q", 1, "N2O")
+        x = (u-u_liq) / (u_vap-u_liq)
+        return m*((1-x)/rho_liq + x/rho_vap) - tank_ox_vol
+    T = scipy.optimize.brentq(volume_constr, 200, 309.5, maxiter=80)
+    if T < 200 :
+        return ydot
+    
+    u_liq = propsi ("U", "T", T, "Q", 0, "N2O")
+    u_vap = propsi ("U", "T", T, "Q", 1, "N2O")
+    x = (u-u_liq) / (u_vap-u_liq)
+            
+    P = propsi ("P", "T", T, "D", m/tank_ox_vol, "N2O")
+    dm = - injector_flow_ox_hem(T, P, P_ch)
+    h = propsi ("H", "T|liquid", T, "P", P, "N2O")
+    
+    
+    def heat_flow(T_diff, coeff_c, coeff_n):
+        L = tank_ox_diam_out
+        cp = propsi ("Cpmass", "T", T, "Q", x, "N2O")
+        rho = propsi ("D", "T", T, "Q", x, "N2O")
+        #mu = propsi ("viscosity", "T", T, "Q", x, "N2O")
+        mu = 15e-6
+        #k = propsi ("conductivity", "T", T, "Q", x, "N2O")
+        k = 50e-3
+        beta = propsi ("isobaric_expansion_coefficient", "T", T, "Q", x, "N2O")
+        Ra = cp * rho**2 * gravity*beta*abs(T_diff)*L**3 / (mu * k)
+        dQ = coeff_c * Ra**coeff_n * k/L
+        return dQ
+    
+    dQ_air = heat_flow(Twall-air_temp, 0.59, 0.25)
+    dQ_tank = heat_flow(Twall-T, 0.21, 0.4)   
+
+    du = dm / m * h # + dQ_tank / m
+    
+    dTwall = -0.01
+    # dTwall = ( - dQ_tank - dQ_air) / ( tank_ox_mass * tank_ox_heat)
+
+    ydot = np.array([dm, du, dTwall])
+    return ydot
+
+
+
 
 def tank_pt_eq(y):
-    m, u = y
+    m, u, Twall = y
     
     def volume_constr(T_func): 
         rho_liq = propsi ("D", "T", T_func, "Q", 0, "N2O")
@@ -202,7 +259,7 @@ def injector_flow_fuel_spi(T1, P1, P2):
 # Tanks
 T_0 = 290
 y0, info = tank_init_eq(T_0, tank_ox_vol, tank_ox_ullage)
-ydot = tank_ode_eq(0, y0)
+ydot = tank_ode_eq2(0, y0)
 
 t_end = 10
 time_span = [0, t_end]
@@ -210,7 +267,7 @@ step = 0.1
 sol_t = np.arange(0, t_end, step)
 sol_P = np.zeros(len(sol_t))
 sol_T = np.zeros(len(sol_t))
-sol = scipy.integrate.solve_ivp(tank_ode_eq, time_span, y0, method='RK45', max_step=0.5, dense_output=True, rtol=1e-6, atol=1e-5)
+sol = scipy.integrate.solve_ivp(tank_ode_eq2, time_span, y0, method='RK45', max_step=0.5, dense_output=True, rtol=1e-6, atol=1e-5)
 sol_y = sol.sol(sol_t)
 
 plt.figure(1)
@@ -221,4 +278,5 @@ plt.figure(2)
 plt.plot(sol_t, sol_P)
 plt.figure(3)
 plt.plot(sol_t, sol_T)
+plt.plot(sol_t, sol_y[2].T)
     
