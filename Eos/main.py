@@ -9,13 +9,12 @@ Created on Sun Dec  7 19:20:42 2025
 # Propellants
 air_temp_celsius = 20 # deg C, surrounding air temp
 fuel_name = 'ethanol' # for fluid property lookup
-ox_ullage = 0.1 # fraction, liquid level fraction of tank
-
 
 # Tanks
 tank_ox_diam_out = 0.11 # m, oxidizer tank outer diameter
 tank_ox_thick = 0.003 # m, oxidizer tank wall thickness
 tank_ox_len = 1 # m, oxidizer tank length, total inner length
+tank_ox_ullage = 0.1 # fraction, liquid level fraction of tank
 tank_fuel_diam_out = 0.05 # m, fuel tank outer diameter
 tank_fuel_thick = 0.002 # m, fuel tank wall thickness
 tank_fuel_len = 1 # m, fuel tank length, inner length below piston
@@ -88,62 +87,49 @@ def tank_init_eq(T0, Vtank, Vvap_fraction):
     m_vap = rho_vap * Vtank * Vvap_fraction
     
     m = m_vap + m_liq   
-    #x = ( (rho_vap*rho_liq)*Vtank/m0 - rho_vap ) / (rho_liq-rho_vap)
-    x = m_vap / m
-    
+    x = m_vap / m  
     T = T0
-    U = m * propsi ("U", "T", T0, "Q", x, "N2O")
+    u = propsi ("U", "T", T0, "Q", x, "N2O")
     T_liq = T
-    T_vap = T
+    T_vap = T      
+    #y = np.array([m, U, T_liq, T_vap])
+    y = np.array([m, u])
     
     P = propsi ("P", "T", T0, "Q", x, "N2O")
+    info = np.array([P, x, u])
     
-    y = np.array([m, U, T_liq, T_vap])
-    info = np.array([P, m, x])
     return y, info
 
 
 def tank_ode_eq(y):
-    #m = y[0]
-    #U = y[1]
-    T_liq = y
+    m = y[0]
+    u = y[1]
     
-    m = 7
-    T = 290
-    U = m * propsi ("U", "T", T, "Q", 0, "N2O")
+    P_ch = 20e5
     
     def volume_constr(T_func): 
         rho_liq = propsi ("D", "T", T_func, "Q", 0, "N2O")
         rho_vap = propsi ("D", "T", T_func, "Q", 1, "N2O")
         u_liq = propsi ("U", "T", T_func, "Q", 0, "N2O")
         u_vap = propsi ("U", "T", T_func, "Q", 1, "N2O")
-        x = (U/m-u_liq) / (u_vap-u_liq)
-        #x = propsi ("Q", "T", T_func, "U", U/m, "N2O")
+        x = (u-u_liq) / (u_vap-u_liq)
         return m*((1-x)/rho_liq + x/rho_vap) - tank_ox_vol
-    T = scipy.optimize.root(volume_constr, T_liq).x[0]
-    #T = sol.
-    
-    #c_
-    
-    #dQ_in = 
-    
-    # dm = 0.0
-    # du = 0.0
-        
-    # P1 = propsi ("P", "T", T1, "U", U, "N2O")
-    # h = propsi ("H", "T", T1, "P", P1, "N2O")
-    # dm = injector_flow_ox_hem(T1, P1, P2)
-    # dU = - dm * h + dQ_in
-    
-    # ydot = np.array([dm, dU])
-    return T
+    T = scipy.optimize.root(volume_constr, 270).x[0]
+            
+    P = propsi ("P", "T", T, "D", m/tank_ox_vol, "N2O")
+    dm = - injector_flow_ox_hem(T, P, P_ch)
+    h = propsi ("H", "T|liquid", T, "P", P, "N2O")
+    du = dm / m * h
+
+    ydot = np.array([dm, du])
+    return ydot, T, P
 
 # Injector mass flow rates
 def injector_flow_ox_hem(T1, P1, P2):
     # Two-phase Homogeneous Equilibrium Model
     mdot = 0 # kg/s, mass flow rate
-    h1 = propsi ("H", "T", T1, "P", P1, "N2O")
-    s1 = propsi ("S", "T", T1, "P", P1, "N2O")
+    h1 = propsi ("H", "T|liquid", T1, "P", P1, "N2O")
+    s1 = propsi ("S", "T|liquid", T1, "P", P1, "N2O")
     #h2 = propsi ("H", "P", max(P2, 1e4), "S", s1, "N2O")
     def flow(P2_func): 
         density = propsi ("D", "P", max(P2_func, 1e5), "S", s1, "N2O")
@@ -168,15 +154,11 @@ def injector_flow_fuel_spi(T1, P1, P2):
 
 
 "Testing ground"
-T1 = 273.15 
-test_Pv = propsi ("P", "T", T1, "Q", 0, "N2O")
-test_ox_mdot_hem = injector_flow_ox_hem(T1, test_Pv+1E3, 2E6)
-test_fuel_mdot = injector_flow_fuel_spi(T1, test_Pv+1E3, 2E6)
-
-x = np.array([1.0, 2.0])
-y = 250
-#T = tank_init_eq(y)
-
+# Injectors
+# T1 = 273.15 
+# test_Pv = propsi ("P", "T", T1, "Q", 0, "N2O")
+# test_ox_mdot_hem = injector_flow_ox_hem(T1, test_Pv+1E3, 2E6)
+# test_fuel_mdot = injector_flow_fuel_spi(T1, test_Pv+1E3, 2E6)
 # P2min = 0
 # P2max = 4E6
 # N = 20
@@ -188,3 +170,7 @@ y = 250
 #     n += 1
 # plt.figure(1)
 # plt.plot(P2s, mdots)
+
+# Tanks
+y, info = tank_init_eq(290, tank_ox_vol, tank_ox_ullage)
+ydot, T, P = tank_ode_eq(y)
