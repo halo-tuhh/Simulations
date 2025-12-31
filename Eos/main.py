@@ -104,41 +104,50 @@ def tank_init_eq(T0, Vtank, Vvap_fraction):
 def tank_ode_eq(t, y):
     m, T = y
     ydot = np.array([0, 0])
+    
+    if m < 0.01 or T < 200: # empty tank or too cold for coolprop
+        return ydot
         
     P_ch = 1e5
     
     rho = m/tank_ox_vol
-
-    rho_liq = propsi ("D", "T", T, "Q", 0, "N2O")
-    rho_vap = propsi ("D", "T", T, "Q", 1, "N2O")
-    x = ( rho_vap*rho_liq - rho_vap*rho ) / ( rho*(rho_liq-rho_vap) )
+    P = propsi ("P", "T", T, "D", rho, "N2O")
+     
+    if T > 309: # critical point
+        rho_liq = propsi ("D", "T", T, "P", P, "N2O")
+        rho_vap = rho_liq
+        x = 1
+        h_vaporization = 0
+    else:
+        rho_liq = propsi ("D", "T", T, "Q", 0, "N2O")
+        rho_vap = propsi ("D", "T", T, "Q", 1, "N2O")
+        x = ( rho_vap*rho_liq - rho_vap*rho ) / ( rho*(rho_liq-rho_vap) )
+        h_liq = propsi ("H", "T", T, "Q", 0, "N2O")
+        h_vap = propsi ("H", "T", T, "Q", 1, "N2O")
+        h_vaporization = h_vap - h_liq
+        
     if x < 0: x = 0 
     if x > 1: x = 1
     m_vap = m * x
-    m_liq = m - m_vap
-    h_liq = propsi ("H", "T", T, "Q", 0, "N2O")
-    h_vap = propsi ("H", "T", T, "Q", 1, "N2O")
-            
-    P = propsi ("P", "T", T, "D", rho, "N2O")
-    dm, dH = injector_flow_ox_hem(T, P, m_liq, P_ch)
+    m_liq = m * (1-x)
+                
     if m_liq < 0.01:
-        dV = dm / rho_vap 
+        dm, dV = injector_flow_ox_gas(T, P, P_ch)
+        cp = propsi ("Cpmass", "T|gas", T, "P", P, "N2O")
+        dT =  ( P*dV/m ) / cp       
     else:
-        dV = dm / rho_liq
-    dv = dV / rho  
-    dh = dH / m
-    
-    h_vaporization = h_vap - h_liq
-    
-    cv = propsi ("Cvmass", "T", T, "Q", x, "N2O")
-    cp = propsi ("Cpmass", "T", T, "Q", x, "N2O")
-    
-    # dT = du / (cp)
-    dudT = propsi ("d(U)/d(T)|D", "T", T, "Q", x, "N2O")
-    dudv = 1 / propsi ("d(U)/d(D)|T", "T", T, "Q", x, "N2O")
-    dT = ( dh - dudv * dv ) / dudT
-    #dT = ( dm / m * h_vaporization ) / dudT
-    #dT = 0
+        dm, dV = injector_flow_ox_hem(T, P, P_ch)
+        cp = propsi ("Cpmass", "T", T, "Q", 0, "N2O")
+        dT = ( h_vaporization * dV*rho_vap/m ) / cp
+        
+    #dv = dV / m
+    #dh = dH / m  
+    #cv = propsi ("Cvmass", "T", T, "Q", x, "N2O")
+    #cp = propsi ("Cpmass", "T", T, "Q", 0, "N2O")
+    #dudT = propsi ("d(U)/d(T)|D", "T", T, "Q", x, "N2O")
+    #dudv = 1 / propsi ("d(U)/d(D)|T", "T", T, "Q", x, "N2O")
+    #dT = ( dh - dudv * dv ) / dudT
+    #dT = ( h_vaporization * dV*rho_vap/m ) / cp
     
     ydot = np.array([dm, dT])
     return ydot
@@ -149,37 +158,39 @@ def tank_pt_eq(y):
     m, T = y
     
     rho = m/tank_ox_vol
+    
+    P = propsi ("P", "T", T, "D", rho, "N2O")
         
-    rho_liq = propsi ("D", "T", T, "Q", 0, "N2O")
-    rho_vap = propsi ("D", "T", T, "Q", 1, "N2O")
-    x = ( rho_vap*rho_liq - rho_vap*rho ) / ( rho*(rho_liq-rho_vap) )
+    if T > 309: # critical point
+        rho_liq = propsi ("D", "T", T, "P", P, "N2O")
+        rho_vap = propsi ("D", "T", T, "P", P, "N2O")
+        x = 1
+    else:
+        rho_liq = propsi ("D", "T", T, "Q", 0, "N2O")
+        rho_vap = propsi ("D", "T", T, "Q", 1, "N2O")
+        x = ( rho_vap*rho_liq - rho_vap*rho ) / ( rho*(rho_liq-rho_vap) )
     if x < 0: x = 0 
     if x > 1: x = 1
     m_vap = m * x
-    m_liq = m - m_vap
+    m_liq = m * (1-x)
             
-    P = propsi ("P", "T", T, "D", rho, "N2O")
-
     return P, m_vap, m_liq
 
 
 # Injector mass flow rates
-def injector_flow_ox_hem(T1, P1, m_liq, P2):
+def injector_flow_ox_hem(T1, P1, P2):
     # Two-phase Homogeneous Equilibrium Model
     dm = 0 # kg/s, mass flow rate
-    #h1 = propsi ("H", "T|liquid", T1, "P", P1, "N2O")
-    if m_liq < 0.01:
-        h1 = propsi ("H", "T|gas", T1, "P", P1, "N2O")
-        s1 = propsi ("S", "T|gas", T1, "P", P1, "N2O")
-    else:
-        h1 = propsi ("H", "T|liquid", T1, "P", P1, "N2O")
-        s1 = propsi ("S", "T|liquid", T1, "P", P1, "N2O")
+
+    h1 = propsi ("H", "T|liquid", T1, "P", P1, "N2O")
+    s1 = propsi ("S", "T|liquid", T1, "P", P1, "N2O")
+    rho1 = propsi ("D", "T|liquid", T1, "P", P1, "N2O")
         
     def flow(P2_func): 
-        rho = propsi ("D", "P", max(P2_func, 1e5), "S", s1, "N2O")
+        rho2 = propsi ("D", "P", max(P2_func, 1e5), "S", s1, "N2O")
         h2 = propsi ("H", "P", max(P2_func, 1e5), "S", s1, "N2O")
         if h2 <= h1: 
-            dm = inj_ox_cd * inj_ox_area * rho * math.sqrt(2*(h1 - h2))
+            dm = inj_ox_cd * inj_ox_area * rho2 * math.sqrt(2*(h1 - h2))
         else: 
             dm = 0
         return dm 
@@ -189,14 +200,35 @@ def injector_flow_ox_hem(T1, P1, m_liq, P2):
     else: 
         dm = flow(P2) 
 
-    dH = dm * h1 
-    return  - dm, - dH
+    dV = dm / rho1
+    return  - dm, -dV
+
+
+def injector_flow_ox_gas(T1, P1, P2):
+    # Two-phase Homogeneous Equilibrium Model
+    dm = 0 # kg/s, mass flow rate
+    
+    rho = propsi ("D", "T|gas", T1, "P", P1, "N2O")  
+    #h = propsi ("H", "T|gas", T1, "P", P1, "N2O")  
+    cp = propsi ("Cpmass", "T|gas", T1, "P", P1, "N2O")
+    cv = propsi ("Cvmass", "T|gas", T1, "P", P1, "N2O")
+    gamma = cp/cv
+    
+    P1_crit = P2 * ( 2 / (gamma+1) ) ** ( (gamma-1) / gamma )    
+    if P1 < P1_crit: 
+        dm = inj_ox_cd*inj_ox_area*rho*np.sqrt( 2*cp*T1*( (P2/P1)**(2/gamma) - (P2/P1)**((gamma+1)/gamma) ) )  
+    else: 
+        dm = inj_ox_cd*inj_ox_area*np.sqrt( gamma * rho * P1 * (2/(gamma+1))**( (gamma+1)/(gamma-1) ) )
+
+    dV = dm / rho
+    return  -dm, -dV
+
 
 def injector_flow_fuel_spi(T1, P1, P2):
     dm = 0 # kg/s, mass flow rate
     density = propsi ("D", "T", T1, "P", P1, fuel_name)
     dm = inj_fuel_cd * inj_fuel_area * math.sqrt( 2*density*(P1-P2) )
-    return  dm 
+    return  - dm 
 
 
 "Testing ground"
@@ -224,15 +256,22 @@ ydot = tank_ode_eq(0, y0)
 
 t_end = 15
 time_span = [0, t_end]
-step = 0.1
-sol_t = np.arange(0, t_end, step)
 
+def tank_empty(t, y):
+    m, T = y
+    if m < 0.01 or T < 200: # empty tank or too cold for coolprop
+        return 0
+    else: return 1
+tank_empty.terminal = True
+sol = scipy.integrate.solve_ivp(tank_ode_eq, time_span, y0, events=tank_empty,  method='RK45', max_step=0.1, dense_output=True, rtol=1e-3, atol=1e-3)
+
+step = 0.01
+t_end = sol.t[len(sol.t)-1]
+sol_t = np.arange(0, t_end, step)
+sol_y = sol.sol(sol_t)
 sol_P = np.zeros(len(sol_t))
 sol_mvap = np.zeros(len(sol_t))
 sol_mliq = np.zeros(len(sol_t))
-
-sol = scipy.integrate.solve_ivp(tank_ode_eq, time_span, y0, method='RK45', max_step=0.5, dense_output=True, rtol=1e-6, atol=1e-5)
-sol_y = sol.sol(sol_t)
 
 for i in range(0, len(sol_t), 1):
     sol_P[i], sol_mvap[i], sol_mliq[i] = tank_pt_eq(sol_y.T[i])
