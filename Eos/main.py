@@ -269,12 +269,12 @@ def chamber_nozzle(dm, isp): # kg mass flow rate, m/s specific impulse
 # plt.plot(P2s, dms)
 
 ### Tanks
-# T_0 = 290
-# y0, info = tank_init_eq(T_0, tank_ox_vol, tank_ox_ullage)
-# ydot = tank_ode_eq(0, y0)
+T_0 = 290
+y0, P, x = tank_init_eq(T_0, tank_ox_vol, tank_ox_ullage)
+ydot = tank_ode_eq(0, y0)
 
-# t_end = 15
-# time_span = [0, t_end]
+t_end = 8
+time_span = [0, t_end]
 
 # def tank_empty(t, y):
 #     m, T = y
@@ -284,27 +284,33 @@ def chamber_nozzle(dm, isp): # kg mass flow rate, m/s specific impulse
 # tank_empty.terminal = True
 # sol = scipy.integrate.solve_ivp(tank_ode_eq, time_span, y0, events=tank_empty,  method='RK45', max_step=0.05, dense_output=True, rtol=1e-3, atol=1e-3)
 
-# step = 0.01
-# t_end = sol.t[len(sol.t)-1]
-# sol_t = np.arange(0, t_end, step)
-# sol_y = sol.sol(sol_t)
-# sol_P = np.zeros(len(sol_t))
-# sol_mvap = np.zeros(len(sol_t))
-# sol_mliq = np.zeros(len(sol_t))
 
-# for i in range(0, len(sol_t), 1):
-#     sol_P[i], sol_mvap[i], sol_mliq[i] = tank_pt_eq(sol_y.T[i])
+step = 0.02
+#t_end = sol.t[len(sol.t)-1]
+sol_t = np.arange(0, t_end, step)
+sol_y = np.zeros((len(sol_t), 2))
 
-# plt.figure(1)
-# plt.plot(sol_t, sol_y[0].T)
-# plt.plot(sol_t, sol_mvap)
-# plt.plot(sol_t, sol_mliq)
-# plt.figure(2)
-# plt.plot(sol_t, sol_y[1].T)
-# plt.figure(3)
-# plt.plot(sol_t, sol_P)
-# plt.figure(4)
-# plt.plot(sol_t[1:len(sol_t)], -np.divide(np.diff(sol_y[0].T), np.diff(sol_t)))
+sol_y[0] = y0
+for i in range(1, len(sol_t), 1):
+    sol_y[i] = sol_y[i-1] + step * tank_ode_eq(0, sol_y[i-1])
+
+sol_P = np.zeros(len(sol_t))
+sol_mvap = np.zeros(len(sol_t))
+sol_mliq = np.zeros(len(sol_t))
+
+for i in range(0, len(sol_t), 1):
+    sol_P[i], sol_mvap[i], sol_mliq[i] = tank_pt_eq(sol_y[i])
+
+plt.figure(1)
+plt.plot(sol_t, sol_y.T[0])
+plt.plot(sol_t, sol_mvap)
+plt.plot(sol_t, sol_mliq)
+plt.figure(2)
+plt.plot(sol_t, sol_y.T[1])
+plt.figure(3)
+plt.plot(sol_t, sol_P)
+plt.figure(4)
+plt.plot(sol_t[1:len(sol_t)], -np.divide(np.diff(sol_y.T[0]), np.diff(sol_t)))
   
 ### Chamber
 dm_ox = 1
