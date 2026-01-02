@@ -13,11 +13,11 @@ fuel_name = 'Ethanol' # for fluid property lookup
 # Tanks
 tank_ox_diam_out = 0.11 # m, oxidizer tank outer diameter
 tank_ox_thick = 0.003 # m, oxidizer tank wall thickness
-tank_ox_len = 1.2 # m, oxidizer tank length, total inner length
+tank_ox_len = 1.0 # m, oxidizer tank length, total inner length
 tank_ox_ullage = 0.15 # fraction, liquid level fraction of tank
 tank_fuel_diam_out = 0.05 # m, fuel tank outer diameter
 tank_fuel_thick = 0.002 # m, fuel tank wall thickness
-tank_fuel_len = 1.2 # m, fuel tank length, inner length below piston
+tank_fuel_len = 1.0 # m, fuel tank length, inner length below piston
 tank_fuel_piston_loss = 0.0 # Pa, fuel tank piston pressure loss
 
 # Valves
@@ -90,27 +90,31 @@ air_temp = 273.15 + air_temp_celsius # K
 def injector_flow_ox_hem(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa chamber pressure
     ### Two-phase Homogeneous Equilibrium Model
     dm = 0 # kg/s, mass flow rate
-    ### Ox condition
-    h1 = propsi ("H", "T|liquid", T1, "P", P1, "N2O")
-    s1 = propsi ("S", "T|liquid", T1, "P", P1, "N2O")
-    rho1 = propsi ("D", "T|liquid", T1, "P", P1, "N2O")
+    ### Ox 
+    if P1 > propsi ("P", "T", T1, "P", P1, "N2O") + 1e3 :
+        h1 = propsi ("H", "T", T1, "P", P1, "N2O")
+        s1 = propsi ("S", "T", T1, "P", P1, "N2O")
+        rho1 = propsi ("D", "T", T1, "P", P1, "N2O")
+    else: 
+        h1 = propsi ("H", "T", T1, "Q", 0, "N2O")
+        s1 = propsi ("S", "T", T1, "Q", 0, "N2O")
+        rho1 = propsi ("D", "T", T1, "Q", 0, "N2O")      
     ### Choked flow ( After Waxman 2014 - An Investigation of Injectors...)
     def flow(P2_func): 
         rho2 = propsi ("D", "P", max(P2_func, 1e5), "S", s1, "N2O")
         h2 = propsi ("H", "P", max(P2_func, 1e5), "S", s1, "N2O")
-        if h2 <= h1: 
-            dm = inj_ox_cd * inj_ox_area * rho2 * math.sqrt(2*(h1 - h2))
+        if h2 < h1: 
+            dm = - inj_ox_cd * inj_ox_area * rho2 * math.sqrt(2*(h1 - h2))
         else: 
             dm = 0
         return dm 
-    P2_crit = scipy.optimize.fmin(lambda P: -flow(P), 1e5, maxiter=10, maxfun=20, disp=0) # find analytical function for critical pressure
-    if P2 < P2_crit: # downstream (chamber) pressure
-        dm = flow(P2_crit)    
+    P2_crit = scipy.optimize.fminbound(flow, 1e5, P1, xtol=1e3, maxfun=8, disp=0) # find critical pressure of choked flow
+    if P2 < P2_crit: # P2 is downstream (chamber) pressure
+       dm = flow(P2_crit)    
     else: 
         dm = flow(P2) 
-
     dV = dm / rho1
-    return  - dm, -dV # kg/s mass flow rate, m^3/s volume removal rate
+    return  dm, dV # kg/s mass flow rate, m^3/s volume removal rate
 
 
 def injector_flow_ox_gas(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa chamber pressure
@@ -124,13 +128,13 @@ def injector_flow_ox_gas(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa
     ### Adiabatic flow with choke condition
     P1_crit = P2 * ( 2 / (gamma+1) ) ** ( (gamma-1) / gamma )   
     if P1 > P2 and P1 > P1_crit : 
-        dm = inj_ox_cd*inj_ox_area*np.sqrt( gamma * rho * P1 * (2/(gamma+1))**( (gamma+1)/(gamma-1) ) )
+        dm = - inj_ox_cd*inj_ox_area*np.sqrt( gamma * rho * P1 * (2/(gamma+1))**( (gamma+1)/(gamma-1) ) )
     elif P1 > P2 : 
-        dm = inj_ox_cd*inj_ox_area*rho*np.sqrt( 2*cp*T1*( (P2/P1)**(2/gamma) - (P2/P1)**((gamma+1)/gamma) ) )  
+        dm = - inj_ox_cd*inj_ox_area*rho*np.sqrt( 2*cp*T1*( (P2/P1)**(2/gamma) - (P2/P1)**((gamma+1)/gamma) ) )  
     else:
         dm = 0.0
     dV = dm / rho
-    return  -dm, -dV # kg/s mass flow rate, m^3/s volume removal rate
+    return  dm, dV # kg/s mass flow rate, m^3/s volume removal rate
 
 
 def injector_flow_fuel_spi(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa chamber pressure
@@ -139,11 +143,11 @@ def injector_flow_fuel_spi(T1, P1, P2): # K tank temperature, Pa tank pressure, 
     P1 = P1 - tank_fuel_piston_loss
     rho = propsi ("D", "T", T1, "P", P1, fuel_name)
     if P1 > P2:
-        dm = inj_fuel_cd * inj_fuel_area * math.sqrt( 2*rho*(P1-P2) )
+        dm = - inj_fuel_cd * inj_fuel_area * math.sqrt( 2*rho*(P1-P2) )
     else:
         dm = 0.0
     dV = dm / rho 
-    return  - dm, -dV # kg/s mass flow rate, m^3/s volume removal rate
+    return  dm, dV # kg/s mass flow rate, m^3/s volume removal rate
 
 
 ### Chamber functions
@@ -165,23 +169,18 @@ def chamber_nozzle(dm, isp): # kg mass flow rate, m/s specific impulse
 
 ### Tank initialization
 def tank_init_eq(T0, Vtank, Vvap_fraction): # K initial temperature, m^3 tank volume, vapor volume fraction (dip tube length dependent)
-    # m, T = y
-    
+    # finds initial condition of tank  
     rho_liq = propsi ("D", "T", T0, "Q", 0, "N2O")
     rho_vap = propsi ("D", "T", T0, "Q", 1, "N2O")
     m_liq = rho_liq * Vtank * (1-Vvap_fraction)
-    m_vap = rho_vap * Vtank * Vvap_fraction
-    
+    m_vap = rho_vap * Vtank * Vvap_fraction    
     m = m_vap + m_liq # kg, oxidizer mass
-    x = m_vap / m  # ratio, vapor mass / total mass
-    
+    x = m_vap / m  # ratio, vapor mass / total mass   
     P = propsi ("P", "T", T0, "Q", x, "N2O") # Pa, tank pressure
-    
     rho_fuel = propsi ("D", "T", T0, "P", air_pressure_zero, fuel_name)
     m_fuel = rho_fuel * tank_fuel_vol
     
-    y = np.array([m, m_fuel, T0])
-    
+    y = np.array([m, m_fuel, T0])  
     return y, P, x
 
 
@@ -198,7 +197,7 @@ def engine_tank_eq(y, ydot, P_ch, step):
     
     ### Abort condition
     if m < 0.1 or T < 200: # empty tank or too cold for coolprop
-        return y, ydot, 0.0, 0.0, 0.0
+        return y, ydot, 0.0, 0.0, 0.0, 0.0
     
     ### Ox tank 
     rho = m/tank_ox_vol # ox density
@@ -299,3 +298,18 @@ plt.figure(5)
 plt.plot(sol_t, sol_Ft)
 #plt.figure(5)
 plt.plot(sol_t, sol_isp)
+
+
+"Test"
+### Injector HEM
+# P1 = 5e6
+# T1 = 290
+# P2_arr = np.arange(1e5, 5e6, 1e4)
+# dm_arr = np.zeros(len(P2_arr))
+# crit_arr = np.zeros(len(P2_arr))
+# #dm_arr, dV = injector_flow_ox_hem(T1, P1, 1e5)
+# for i in range(1, len(P2_arr), 1):
+#     dm_arr[i], dV = injector_flow_ox_hem(T1, P1, P2_arr[i])
+#     #print(P2crit)    
+# plt.figure(1)
+# plt.plot(P2_arr, dm_arr)
