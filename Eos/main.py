@@ -156,8 +156,9 @@ def chamber_combustion(dm_ox, dm_fuel): # kg/s, mass flow rates. Must be positiv
         dm_ratio = dm_ox / dm_fuel
         Pc = 1e5 # Pa, chamber pressure. Initial guess with arbitrary atmospheric
         for i in range(0, 10, 1): # run couple of times to converge Pc
-            isp_vac, c_star, T_c = C.get_IvacCstrTc(Pc=Pc, MR=dm_ratio, eps=chamber_expansion, frozen=0, frozenAtThroat=0)       
-            Pc = c_star * (dm_ox + dm_fuel) / chamber_throat_area * chamber_Cstar_overwrite
+            isp_vac, c_star_opt, T_c = C.get_IvacCstrTc(Pc=Pc, MR=dm_ratio, eps=chamber_expansion, frozen=0, frozenAtThroat=0)       
+            c_star = c_star_opt * chamber_Cstar_overwrite
+            Pc = c_star * (dm_ox + dm_fuel) / chamber_throat_area
     else:
         Pc = 0.0; c_star = 0.0; isp_vac = 0.0
     return Pc, c_star, isp_vac # Pa chamber pressure, m/s combustion efficiency, m/s specific impulse, 
@@ -189,61 +190,59 @@ def tank_init_eq(T0, Vtank, Vvap_fraction): # K initial temperature, m^3 tank vo
 
 ### Main engine run function with equilibrium tank
 def engine_tank_eq(y, ydot, P_ch, step):
-    m, mf, T = y
+    m, mf, T = y # ox mass, fuel mass, tank temperature
     
     ### Integration
     y = y + step * ydot # explicit Euler
     ydot = np.array([0, 0, 0])  # initialize 
     
-    ### Abort condition
+    ### End condition
     if m < 0.1 or T < 200: # empty tank or too cold for coolprop
         return y, ydot, 0.0, 0.0, 0.0, 0.0
     
     ### Ox tank 
     rho = m/tank_ox_vol # ox density
     P = propsi ("P", "T", T, "D", rho, "N2O")  # tank pressure    
-    if T > 309: # critical point
+    if T > 309: # above critical point of N2O
         rho_liq = propsi ("D", "T", T, "P", P, "N2O")
         rho_vap = rho_liq
-        x = 1
+        x = 1 # ratio, vapor quality: gas mass / total mass
         h_vaporization = 0
-    else:
+    else: # in liquid/vapor regime
         rho_liq = propsi ("D", "T", T, "Q", 0, "N2O")
         rho_vap = propsi ("D", "T", T, "Q", 1, "N2O")
         x = ( rho_vap*rho_liq - rho_vap*rho ) / ( rho*(rho_liq-rho_vap) )
         h_liq = propsi ("H", "T", T, "Q", 0, "N2O")
         h_vap = propsi ("H", "T", T, "Q", 1, "N2O")
-        h_vaporization = h_vap - h_liq       
+        h_vaporization = h_vap - h_liq
     if x < 0: x = 0 
     if x > 1: x = 1
-    m_vap = m * x
-    m_liq = m * (1-x)
+    m_liq = m * (1-x) # kg, ox liquid mass; m_vap = m * x
     
     ### Fuel injector
     if mf > 0.01: 
-        dmf, dVf = injector_flow_fuel_spi(T, P, P_ch)
+        dmf, dVf = injector_flow_fuel_spi(T, P, P_ch) # kg/s, fuel mass flow rate
     else:
         dmf = 0.0; dVf = 0.0      
          
     ### Ox injector       
     if m > 0.01 and m_liq > 0.01:
-        dm, dV = injector_flow_ox_hem(T, P, P_ch)
+        dm, dV = injector_flow_ox_hem(T, P, P_ch) # kg/s, ox mass flow rate for two-phase HEM
         cp = propsi ("Cpmass", "T", T, "Q", 0, "N2O")
-        dT = ( h_vaporization * (dV+dVf)*rho_vap/m ) / cp # ox and fuel outflow result in expansion -> vaporization -> temperature drop   
+        dT = ( h_vaporization * (dV+dVf)*rho_vap/m ) / cp # adiabatic expansion -> vaporization -> temperature drop   
     elif m > 0.01:
-        dm, dV = injector_flow_ox_gas(T, P, P_ch)
+        dm, dV = injector_flow_ox_gas(T, P, P_ch) # kg/s, ox mass flow rate for one-phase vapor only
         cp = propsi ("Cpmass", "T|gas", T, "P", P, "N2O")
-        dT =  ( P*dV/m ) / cp   
+        dT =  ( P*(dV+dVf)/m ) / cp # adiabatic expansion -> temperature drop  
     else:
         dm = 0.0; dT = 0.0
         
     ### Chamber 
-    P_ch, c_star, isp_vac = chamber_combustion(-dm, -dmf)
-    #P_ch = (1-time_const) * P_ch + time_const * P_ch_instant # 1st order lowpass to smooth
-    F_thrust = chamber_nozzle( -(dm+dmf), isp_vac)
+    P_ch, c_star, isp_vac = chamber_combustion(-dm, -dmf) # Pa, m/s, m/s
+    F_thrust = chamber_nozzle( -(dm+dmf), isp_vac) # N
         
     ### Return
-    ydot = np.array([dm, dmf, dT])
+    ydot = np.array([dm, dmf, dT]) # rates of: ox mass, fuel mass, tank temperature
     
     return y, ydot, P, P_ch, F_thrust, isp_vac
 
@@ -279,6 +278,18 @@ for t in range(1, len(sol_t), 1):
     sol_Pc[t] = P_ch
     sol_Ft[t] = F_thrust
     sol_isp[t] = isp_vac
+
+### Solution numbers
+print("Burn time: ", sol_t[len(sol_t)-1], " s")
+print("Isp max: ", max(sol_isp)/9.81, " s") 
+print("Isp avg: ", sum(sol_isp)/9.81/len(sol_t), " s")     
+print("Thrust max: ", max(sol_Ft), " N")
+print("Thrust avg: ", sum(sol_Ft)/len(sol_t), " N")
+print("Impulse: ", sum(sol_Ft)/len(sol_t)*sol_t[len(sol_t)-1], " Ns")
+print("TWR max: ", max(sol_Ft)/9.81/(rocket_mass_dry+sol_y[0,0]+sol_y[0,1]))
+print("Pc max: ", max(sol_Pc)/1e5, " bar")
+print("Ptank max: ", max(sol_P)/1e5, " bar")
+
 
 
 "Plot"
