@@ -1,17 +1,17 @@
 %% Parameters
 %%% Rocket
-rocket_mass = 6;
-tank_volume = 20 * 1e-3;
-tank_radius = 6e-2;
+rocket_mass = 8;
+tank_volume = 10 * 1e-3;
+tank_radius = 8.5e-2;
 nozzle_radius = 4e-3;
-K_loss = 0.0;
+K_loss = 0.3;
 
 %%% Propellant
-prop_mass = 7.5;
+prop_mass = 5;
 prop_density = 998;
 
 %%% Pressurant
-pres_pressure = 60 * 1e5;
+pres_pressure = 150 * 1e5;
 pres_temp = 293;
 pres_gamma = 1.4; % air 
 % pres_gamma = 1.29; % co2

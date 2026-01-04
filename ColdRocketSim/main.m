@@ -8,6 +8,8 @@ tspan = 0:0.01:30;
 opts = odeset('Events', @stopping_vel); 
 [sol_t, sol_x, te, ~] = ode45(@(t_,x_)eom(t_,x_), tspan, x_init, opts);
 
+%% other values
+
 sol_pressure = 0;
 sol_thrust = 0;
 sol_accel = 0;
@@ -18,7 +20,6 @@ for i = 1:length(sol_x)
     sol_accel(i) = thrust / (sol_x(i,3)+rocket_mass) / g - 1;
 end
 
-
 apogee = max(sol_x(:,1));
 max_vel = max(sol_x(:,2));
 max_accel = max(sol_accel);
@@ -26,9 +27,11 @@ impulse = trapz(sol_t, sol_thrust);
 isp = impulse / (prop_mass + pres_mass) / g;
 max_thrust = max(sol_thrust);
 
-disp(['  Apogee     ', 'v_max     ', 'G_max  '])
+%% display and plot
+
+disp(['  Apogee     ', 'v_max     ', 'g_max'])
 disp([apogee, max_vel, max_accel])
-disp(['  Impulse    ', 'ISP      ', 'T_max  '])
+disp(['  Impulse    ', 'ISP       ', 'T_max'])
 disp([impulse, isp, max_thrust])
 
 
