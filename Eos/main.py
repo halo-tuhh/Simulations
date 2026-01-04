@@ -7,7 +7,7 @@ Created on Sun Dec  7 19:20:42 2025
 
 "Parameters"
 # Operations
-ops_temp_celsius = 0 # deg C, initial tank temperature after filling
+ops_temp_celsius = 10 # deg C, initial tank temperature after filling
 ops_fuel_name = 'Ethanol' # for fluid property lookup
 ops_pressurant_name = 'N2' # for fluid property lookup
 ops_pressurizing_enable = 0 # boolean, enable inert gas pressurization on the pad
@@ -33,14 +33,14 @@ inj_ox_number = 12 # number of individual oxidizer orifices
 inj_ox_diam_mm = 2.4 # mm, diameter of one ox orifice
 inj_ox_cd = 0.8 # discharge coefficient oxidizer
 inj_fuel_number = 16 # number of individual fuel orifices
-inj_fuel_diam_mm = 0.75 # mm, diameter of one fuel orifice
+inj_fuel_diam_mm = 0.8 # mm, diameter of one fuel orifice
 inj_fuel_cd = 0.63 # discharge coefficient fuel
 
 # Chamber
 chamber_diam = 0.05 # m, chamber inner diameter
 chamber_length = 0.1 # m, chamber length
-chamber_throat = 0.035 # m, nozzle throat diameter
-chamber_exit = 0.055 # m, nozzle exit diameter
+chamber_throat = 0.03 # m, nozzle throat diameter
+chamber_exit = 0.052 # m, nozzle exit diameter
 chamber_cstar_efficiency = 0.75 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
@@ -394,6 +394,7 @@ plt.grid(True)
 plt.legend()
 plt.figure(6)
 plt.plot(sol_t, sol_exp, label='Expansion ratio')
+plt.ylim(0, 2)
 plt.title('Nozzle')
 plt.xlabel('Time $t$ [s]')
 plt.ylabel('Ratio')
