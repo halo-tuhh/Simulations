@@ -33,14 +33,14 @@ inj_ox_number = 12 # number of individual oxidizer orifices
 inj_ox_diam_mm = 2.4 # mm, diameter of one ox orifice
 inj_ox_cd = 0.8 # discharge coefficient oxidizer
 inj_fuel_number = 16 # number of individual fuel orifices
-inj_fuel_diam_mm = 0.8 # mm, diameter of one fuel orifice
+inj_fuel_diam_mm = 0.75 # mm, diameter of one fuel orifice
 inj_fuel_cd = 0.63 # discharge coefficient fuel
 
 # Chamber
 chamber_diam = 0.05 # m, chamber inner diameter
 chamber_length = 0.1 # m, chamber length
 chamber_throat = 0.03 # m, nozzle throat diameter
-chamber_exit = 0.052 # m, nozzle exit diameter
+chamber_exit = 0.053 # m, nozzle exit diameter
 chamber_cstar_efficiency = 0.75 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
@@ -110,7 +110,10 @@ def injector_ox_hem(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa cham
         else: 
             dm = 0
         return dm 
-    P2_crit = scipy.optimize.fminbound(flow, 1e5, P1, xtol=1e3, maxfun=10, disp=0) # find critical pressure of choked flow
+    if P1 > 1e5:
+        P2_crit = scipy.optimize.fminbound(flow, 1e5, P1, xtol=1e3, maxfun=10, disp=0) # find critical pressure of choked flow
+    else:
+        return 0.0, 0.0
     if P2 < P2_crit: # P2 is downstream (chamber) pressure
        dm = flow(P2_crit)    
     else: 
@@ -119,7 +122,7 @@ def injector_ox_hem(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa cham
     return  dm, dV # kg/s mass flow rate, m^3/s volume removal rate
 
 
-def injector_ox_hem_gas(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa chamber pressure
+def injector_ox_gas(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa chamber pressure
     ### One-phase ideal gas model
     dm = 0 # kg/s, mass flow rate   
     ### Tank condition
@@ -158,7 +161,7 @@ def chamber(dm_ox, dm_fuel): # kg/s, mass flow rates
     dm_ox = abs(dm_ox)
     dm_fuel = abs(dm_fuel)
     dm = dm_ox + dm_fuel
-    if dm_fuel > 0.001: # only if fuel is still flowing
+    if dm_fuel > 0.001 and dm_ox > 0.001: # only if both props are still flowing
         dm_ratio = dm_ox / dm_fuel
         Pc = 1e5 # Pa, chamber pressure. Initial guess with arbitrary atmospheric
         for i in range(0, 10, 1): # run couple of times to converge chamber pressure
@@ -278,9 +281,9 @@ def engine_tank_eq(y, ydot, P_ch, step):
     if m > 0.01 and m_liq > 0.01:
         dm, dV = injector_ox_hem(T, P, P_ch) # kg/s, ox mass flow rate for two-phase HEM
         cp = propsi ("Cpmass", "T", T, "Q", 0, "N2O")
-        dT = ( h_vaporization * (dV+dVf)*rho_vap/m ) / cp # adiabatic expansion -> vaporization -> temperature drop   
+        dT = h_vaporization/cp * (dV+dVf)*rho_vap*(1-x)/m # adiabatic expansion -> vaporization -> temperature drop   
     elif m > 0.01:
-        dm, dV = injector_ox_hem_gas(T, P, P_ch) # kg/s, ox mass flow rate for one-phase vapor only
+        dm, dV = injector_ox_gas(T, P, P_ch) # kg/s, ox mass flow rate for one-phase vapor only
         cp = propsi ("Cpmass", "T|gas", T, "P", P, "N2O")
         dT =  ( P*(dV+dVf)/m ) / cp # adiabatic expansion -> temperature drop  
     else:
@@ -288,7 +291,9 @@ def engine_tank_eq(y, ydot, P_ch, step):
         
     ### Chamber combustion and nozzle
     F_thrust, P_ch, c_star, isp, expansion = chamber(dm, dmf) # N, Pa, m/s, m/s
-    isp_real = F_thrust / abs(dm+dmf)    
+    if abs(dm+dmf) > 0.001 :
+        isp_real = F_thrust / abs(dm+dmf)    
+    else: isp_real = 0.0
     
     ### Return
     ydot = np.array([dm, dmf, dT]) # rates of: ox mass, fuel mass, tank temperature
@@ -300,7 +305,7 @@ def engine_tank_eq(y, ydot, P_ch, step):
 ### Setup
 T_0 = ops_temp
 t_end = 15
-step = 0.02
+step = 0.01
 
 y0, P, x = tank_init_eq(T_0, tank_ox_vol, tank_ox_ullage)
 if ops_heating_enable:
@@ -364,7 +369,7 @@ plt.figure(2)
 plt.plot(sol_t, sol_y[:,2], label='Tank temperature')
 plt.title('Temperature')
 plt.xlabel('Time $t$ [s]')
-plt.ylabel('Temperature $T$ [kg]')
+plt.ylabel('Temperature $T$ [K]')
 plt.grid(True)
 plt.legend()
 plt.figure(3)
