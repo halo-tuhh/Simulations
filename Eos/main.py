@@ -6,6 +6,8 @@ Created on Sun Dec  7 19:20:42 2025
 """
 
 "Parameters"
+filename = 'eos_test' # name of the .rse file
+
 # Operations
 ops_temp_celsius = 10 # deg C, initial tank temperature after filling
 ops_fuel_name = 'Ethanol' # for fluid property lookup
@@ -21,7 +23,7 @@ tank_ox_len = 1.0 # m, oxidizer tank length, total inner length
 tank_ox_ullage = 0.15 # fraction, liquid level fraction of tank
 tank_fuel_diam_out = 0.05 # m, fuel tank outer diameter
 tank_fuel_thick = 0.002 # m, fuel tank wall thickness
-tank_fuel_len = 1.0 # m, fuel tank length, inner length below piston
+tank_fuel_len = 0.9 # m, fuel tank length, inner length below piston
 tank_fuel_piston_loss = 0.0 # Pa, fuel tank piston pressure loss
 
 # Valves
@@ -32,15 +34,18 @@ valve_fuel_cv = 0.8 # flow coefficient of fuel run valve
 inj_ox_number = 12 # number of individual oxidizer orifices
 inj_ox_diam_mm = 2.4 # mm, diameter of one ox orifice
 inj_ox_cd = 0.8 # discharge coefficient oxidizer
-inj_fuel_number = 16 # number of individual fuel orifices
-inj_fuel_diam_mm = 0.75 # mm, diameter of one fuel orifice
+inj_fuel_number = 12 # number of individual fuel orifices
+inj_fuel_diam_mm = 0.8 # mm, diameter of one fuel orifice
 inj_fuel_cd = 0.63 # discharge coefficient fuel
+inj_film_number = 6 # number of individual fuel orifices for film cooling
+inj_film_diam_mm = 0.4 # mm, diameter of one fuel orifice for film cooling
+inj_film_cd = 0.63 # discharge coefficient fuel for film cooling
 
 # Chamber
-chamber_diam = 0.05 # m, chamber inner diameter
+chamber_diam = 0.07 # m, chamber inner diameter
 chamber_length = 0.1 # m, chamber length
 chamber_throat = 0.03 # m, nozzle throat diameter
-chamber_exit = 0.053 # m, nozzle exit diameter
+chamber_exit = 0.055 # m, nozzle exit diameter
 chamber_cstar_efficiency = 0.75 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
@@ -68,12 +73,14 @@ C = CEA_Obj( oxName='N2O', fuelName=ops_fuel_name, isp_units='m/s', cstar_units=
 tank_ox_diam = tank_ox_diam_out - 2*tank_ox_thick # m, oxidizer tank inner diameter
 tank_fuel_diam = tank_fuel_diam_out - 2*tank_fuel_thick # m, fuel tank inner diameter
 tank_fuel_vol = (tank_fuel_diam/2)**2*np.pi * tank_fuel_len # m^3, fuel tank volume
-tank_ox_vol = (tank_ox_diam/2)**2*np.pi * tank_ox_len - tank_fuel_vol# m^3, oxidizer tank volume
+tank_ox_vol = ( (tank_ox_diam/2)**2 - (tank_fuel_diam/2)**2 ) * np.pi * tank_ox_len # m^3, oxidizer tank volume
 
 inj_ox_diam = inj_ox_diam_mm/1000
 inj_fuel_diam = inj_fuel_diam_mm/1000
+inj_film_diam = inj_film_diam_mm/1000
 inj_ox_area = (inj_ox_diam/2)**2 * np.pi * inj_ox_number # m^2, cross-section area of all oxidizer injector orifices
-inj_fuel_area = (inj_fuel_diam/2)**2 * np.pi * inj_fuel_number # m^2, cross-section area of all fuel injector orifices
+inj_fuel_area = (inj_fuel_diam/2)**2 * np.pi * inj_fuel_number + (inj_film_diam/2)**2 * np.pi * inj_film_number # m^2, cross-section area of all fuel injector orifices
+
 
 chamber_throat_area = chamber_throat**2 / 4 * np.pi # m^2, nozzle throat area
 chamber_exit_area = chamber_exit**2 / 4 * np.pi # m^2, nozzle exit area
@@ -155,7 +162,7 @@ def injector_fuel_spi(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa ch
     return  dm, dV # kg/s mass flow rate, m^3/s volume removal rate
 
 
-"Combustion cahmber and nozzle"
+"Combustion chamber and nozzle"
 
 def chamber(dm_ox, dm_fuel): # kg/s, mass flow rates
     dm_ox = abs(dm_ox)
@@ -169,7 +176,7 @@ def chamber(dm_ox, dm_fuel): # kg/s, mass flow rates
             c_star = c_star_opt * chamber_cstar_efficiency
             Pc = c_star * dm / chamber_throat_area
         expansion = air_pressure_zero / Pc * C.get_PcOvPe(Pc=Pc, MR=dm_ratio, eps=chamber_expansion, frozen=0, frozenAtThroat=0)
-        isp_amb = chamber_nozzle_efficiency * C.estimate_Ambient_Isp(Pc=Pc, MR=dm_ratio, eps=chamber_expansion, Pamb=air_pressure_zero)[0]
+        isp_amb = chamber_nozzle_efficiency * chamber_cstar_efficiency * C.estimate_Ambient_Isp(Pc=Pc, MR=dm_ratio, eps=chamber_expansion, Pamb=air_pressure_zero)[0]
     else:
         Pc = 0.0; c_star = 0.0; isp_amb = 0.0; expansion=0.0
     F = dm * isp_amb # N, thrust force
@@ -252,6 +259,8 @@ def engine_tank_eq(y, ydot, P_ch, step):
         rho_vap = rho_liq
         x = 1 # ratio, vapor quality: gas mass / total mass
         h_vaporization = 0
+        Z_vap = propsi ("Z", "T", T, "P", P, "N2O")
+        #Z_liq = Z_vap
     else: # in liquid/vapor regime
         rho_liq = propsi ("D", "T", T, "Q", 0, "N2O")
         rho_vap = propsi ("D", "T", T, "Q", 1, "N2O")
@@ -259,6 +268,8 @@ def engine_tank_eq(y, ydot, P_ch, step):
         h_liq = propsi ("H", "T", T, "Q", 0, "N2O")
         h_vap = propsi ("H", "T", T, "Q", 1, "N2O")
         h_vaporization = h_vap - h_liq
+        #Z_liq = propsi ("Z", "T", T, "Q", 0, "N2O")
+        Z_vap = propsi ("Z", "T", T, "Q", 1, "N2O")
     if x < 0: x = 0 
     if x > 1: x = 1
     m_liq = m * (1-x) # kg, ox liquid mass
@@ -281,11 +292,11 @@ def engine_tank_eq(y, ydot, P_ch, step):
     if m > 0.01 and m_liq > 0.01:
         dm, dV = injector_ox_hem(T, P, P_ch) # kg/s, ox mass flow rate for two-phase HEM
         cp = propsi ("Cpmass", "T", T, "Q", 0, "N2O")
-        dT = h_vaporization/cp * (dV+dVf)*rho_vap*(1-x)/m # adiabatic expansion -> vaporization -> temperature drop   
+        dT = h_vaporization/cp * (dV+dVf)*rho_vap*(Z_vap)/m # adiabatic expansion -> vaporization -> temperature drop   
     elif m > 0.01:
         dm, dV = injector_ox_gas(T, P, P_ch) # kg/s, ox mass flow rate for one-phase vapor only
         cp = propsi ("Cpmass", "T|gas", T, "P", P, "N2O")
-        dT =  ( P*(dV+dVf)/m ) / cp # adiabatic expansion -> temperature drop  
+        dT =  ( P*(dV+dVf)*(Z_vap)/m ) / cp # adiabatic expansion -> temperature drop  
     else:
         dm = 0.0; dT = 0.0
         
@@ -305,7 +316,7 @@ def engine_tank_eq(y, ydot, P_ch, step):
 ### Setup
 T_0 = ops_temp
 t_end = 15
-step = 0.01
+step = 0.04
 
 y0, P, x = tank_init_eq(T_0, tank_ox_vol, tank_ox_ullage)
 if ops_heating_enable:
@@ -340,12 +351,12 @@ for t in range(1, len(sol_t), 1):
     sol_exp = np.append(sol_exp, expans)
 
 ### Solution numbers
-print("Burn time:", round(sol_t[len(sol_t)-1], 2), "s")
+print("Burn time:", round(sol_t[-1], 2), "s")
 print("Isp max:", round(max(sol_isp)/9.81, 1), "s") 
 print("Isp avg:", round(sum(sol_isp)/9.81/len(sol_t), 1), "s")     
 print("Thrust max:", round(max(sol_Ft)), "N")
 print("Thrust avg:", round(sum(sol_Ft)/len(sol_t)), "N")
-print("Impulse:", round(sum(sol_Ft)/len(sol_t)*sol_t[len(sol_t)-1]/1000, 3), "kNs")
+print("Impulse:", round(sum(sol_Ft)/len(sol_t)*sol_t[-1]/1000, 3), "kNs")
 print("TWR max:", round(max(sol_Ft)/9.81/(rocket_mass_dry+sol_y[0,0]+sol_y[0,1]), 2))
 print("P_chamber max:", round(max(sol_Pc)/1e5, 2), "bar")
 print("P_tank max:", round(max(sol_P)/1e5, 2), "bar")
@@ -407,6 +418,40 @@ plt.grid(True)
 plt.legend()
 
 
+"Export as RSE"
+# Function to calculate CG (placeholder, replace with your actual calculation)
+def calculate_cg(mass_ox, mass_fuel):
+    # Example: linear interpolation based on mass
+    mass_ox_0 = y0[0]; mass_fuel_0 = y0[1]
+    return tank_ox_len * (1 - 0.5 * (mass_ox + mass_fuel) / (mass_ox_0 + mass_fuel_0))
+
+# Generate XML content
+xml_lines = [
+    '<engine-database>',
+    '\t<engine-list>',
+    f'\t\t<engine mfg="HALO" Type="liquid" code="Static Fire Simulation" auto-calc-cg="0" auto-calc-mass="0" len="{tank_ox_len*1000}" dia="{tank_ox_diam*1000}" initWt="{(y0[0] + y0[1])*1000}" propWt="{(y0[0] + y0[1])*1000}" burn-time="{sol_t[-1]}">',
+    '\n\t\t\t<comments>\n\t\t\t Generated by Finn Breuer \n\t\t\t</comments>\n',
+    '\t\t\t<data>'
+]
+
+for t, thrust, y in zip(sol_t, sol_Ft, sol_y):
+    mass_ox, mass_fuel, temperature = y
+    mass_total = mass_ox + mass_fuel
+    cg = calculate_cg(mass_ox, mass_fuel)
+    xml_lines.append(f'\t\t\t\t<eng-data t="{t:.10f}" f="{thrust:.10f}" m="{(mass_total*1000):.10f}" cg="{(cg*1000):.10f}"/>')
+#xml_lines.append(f'\t\t\t\t<eng-data t="{t:.10f}" f="{thrust:.10f}" m="{total_mass:.10f}" cg="{cg:.10f}"/>')
+
+
+xml_lines.extend([
+    '\t\t\t</data>',
+    '\t\t</engine>',
+    '\t</engine-list>',
+    '</engine-database>'
+])
+
+# Save to .rse file
+with open(f'{filename}.rse', 'w') as f:
+    f.write('\n'.join(xml_lines))
 
 "Test"
 ### Injector HEM
