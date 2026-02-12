@@ -14,7 +14,7 @@ ops_fuel_name = 'Ethanol' # for fluid property lookup
 ops_pressurant_name = 'N2' # for fluid property lookup
 ops_pressurizing_enable = 0 # boolean, enable inert gas pressurization on the pad
 ops_heating_enable = 0 # boolean, enable tank heating on the pad
-ops_pressure_target = 5e6 # Pa, firing pressure. Requires either presurization or heating enabled
+ops_pressure_target = 6e6 # Pa, firing pressure. Requires either presurization or heating enabled
 
 # Tanks
 tank_ox_diam_out = 0.11 # m, oxidizer tank outer diameter
@@ -32,20 +32,20 @@ valve_fuel_cv = 0.8 # flow coefficient of fuel run valve
 
 # Injectors
 inj_ox_number = 12 # number of individual oxidizer orifices
-inj_ox_diam_mm = 2.4 # mm, diameter of one ox orifice
+inj_ox_diam_mm = 2.45 # mm, diameter of one ox orifice
 inj_ox_cd = 0.8 # discharge coefficient oxidizer
 inj_fuel_number = 12 # number of individual fuel orifices
 inj_fuel_diam_mm = 0.8 # mm, diameter of one fuel orifice
 inj_fuel_cd = 0.63 # discharge coefficient fuel
 inj_film_number = 6 # number of individual fuel orifices for film cooling
-inj_film_diam_mm = 0.4 # mm, diameter of one fuel orifice for film cooling
+inj_film_diam_mm = 0.5 # mm, diameter of one fuel orifice for film cooling
 inj_film_cd = 0.63 # discharge coefficient fuel for film cooling
 
 # Chamber
 chamber_diam = 0.07 # m, chamber inner diameter
-chamber_length = 0.1 # m, chamber length
-chamber_throat = 0.03 # m, nozzle throat diameter
-chamber_exit = 0.055 # m, nozzle exit diameter
+chamber_length = 0.15 # m, chamber length
+chamber_throat = 0.0305 # m, nozzle throat diameter
+chamber_exit = 0.066 # m, nozzle exit diameter
 chamber_cstar_efficiency = 0.75 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
