@@ -9,12 +9,12 @@ Created on Sun Dec  7 19:20:42 2025
 filename = 'eos_test' # name of the .rse file
 
 # Operations
-ops_temp_celsius = 10 # deg C, initial tank temperature after filling
+ops_temp_celsius = 20 # deg C, initial tank temperature after filling
 ops_fuel_name = 'Ethanol' # for fluid property lookup
 ops_pressurant_name = 'N2' # for fluid property lookup
 ops_pressurizing_enable = 0 # boolean, enable inert gas pressurization on the pad
 ops_heating_enable = 0 # boolean, enable tank heating on the pad
-ops_pressure_target = 6e6 # Pa, firing pressure. Requires either presurization or heating enabled
+ops_pressure_target = 7e6 # Pa, firing pressure. Requires either presurization or heating enabled
 
 # Tanks
 tank_ox_diam_out = 0.11 # m, oxidizer tank outer diameter
@@ -44,8 +44,8 @@ inj_film_cd = 0.63 # discharge coefficient fuel for film cooling
 # Chamber
 chamber_diam = 0.07 # m, chamber inner diameter
 chamber_length = 0.15 # m, chamber length
-chamber_throat = 0.0305 # m, nozzle throat diameter
-chamber_exit = 0.066 # m, nozzle exit diameter
+chamber_throat = 0.032 # m, nozzle throat diameter
+chamber_exit = 0.06 # m, nozzle exit diameter
 chamber_cstar_efficiency = 0.75 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
@@ -94,7 +94,7 @@ ops_temp = 273.15 + ops_temp_celsius # K
 ops_pressurant_mass = 0.0 # kg, mass of inert press gas. Set to zero in case pressurization is disabled
 
 
-"Injectos"
+"Injectors"
 
 def injector_ox_hem(T1, P1, P2): # K tank temperature, Pa tank pressure, Pa chamber pressure
     ### Two-phase Homogeneous Equilibrium Model
@@ -232,7 +232,7 @@ def tank_init_pressurizing(y0, P_target): # initial state, Pa firing pressure ta
         rho_press = propsi ("D", "T", T, "P", P_press, ops_pressurant_name) # kg/m^3, inert gas initial density    
         m_press = rho_press * V_press
     else:
-        m_press = 0       
+        m_press = 0     
     return m_press
 
 
