@@ -23,7 +23,7 @@ tank_ox_len = 1.0 # m, oxidizer tank length, total inner length
 tank_ox_ullage = 0.15 # fraction, liquid level fraction of tank
 tank_fuel_diam_out = 0.05 # m, fuel tank outer diameter
 tank_fuel_thick = 0.002 # m, fuel tank wall thickness
-tank_fuel_len = 0.9 # m, fuel tank length, inner length below piston
+tank_fuel_len = 0.8 # m, fuel tank length, inner length below piston
 tank_fuel_piston_loss = 0.0 # Pa, fuel tank piston pressure loss
 
 # Valves
@@ -35,10 +35,10 @@ inj_ox_number = 12 # number of individual oxidizer orifices
 inj_ox_diam_mm = 2.45 # mm, diameter of one ox orifice
 inj_ox_cd = 0.8 # discharge coefficient oxidizer
 inj_fuel_number = 12 # number of individual fuel orifices
-inj_fuel_diam_mm = 0.8 # mm, diameter of one fuel orifice
+inj_fuel_diam_mm = 0.85 # mm, diameter of one fuel orifice
 inj_fuel_cd = 0.63 # discharge coefficient fuel
 inj_film_number = 6 # number of individual fuel orifices for film cooling
-inj_film_diam_mm = 0.5 # mm, diameter of one fuel orifice for film cooling
+inj_film_diam_mm = 0.55 # mm, diameter of one fuel orifice for film cooling
 inj_film_cd = 0.63 # discharge coefficient fuel for film cooling
 
 # Chamber
@@ -46,7 +46,7 @@ chamber_diam = 0.07 # m, chamber inner diameter
 chamber_length = 0.15 # m, chamber length
 chamber_throat = 0.032 # m, nozzle throat diameter
 chamber_exit = 0.06 # m, nozzle exit diameter
-chamber_cstar_efficiency = 0.75 # factor, combustion efficiency
+chamber_cstar_efficiency = 0.85 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
 # Rocket
