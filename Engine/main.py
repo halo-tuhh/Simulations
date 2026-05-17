@@ -6,13 +6,14 @@ Created on Sun Dec  7 19:20:42 2025
 """
 
 "Parameters"
-filename = 'eos_test' # name of the .rse file
+rse_filename = 'eos_1_preflow_supercharge' # name of the .rse file
+rse_code = 'Eos 1.0 Sim Pre-Coldflow Supercharge'
 
 # Operations
-ops_temp_celsius = 20 # deg C, initial tank temperature after filling
+ops_temp_celsius = 15 # deg C, initial tank temperature after filling
 ops_fuel_name = 'Ethanol' # for fluid property lookup
 ops_pressurant_name = 'N2' # for fluid property lookup
-ops_pressurizing_enable = 0 # boolean, enable inert gas pressurization on the pad
+ops_pressurizing_enable = 1 # boolean, enable inert gas pressurization on the pad
 ops_heating_enable = 0 # boolean, enable tank heating on the pad
 ops_pressure_target = 7e6 # Pa, firing pressure. Requires either presurization or heating enabled
 
@@ -23,30 +24,30 @@ tank_ox_len = 1.0 # m, oxidizer tank length, total inner length
 tank_ox_ullage = 0.15 # fraction, liquid level fraction of tank
 tank_fuel_diam_out = 0.05 # m, fuel tank outer diameter
 tank_fuel_thick = 0.002 # m, fuel tank wall thickness
-tank_fuel_len = 0.8 # m, fuel tank length, inner length below piston
-tank_fuel_piston_loss = 0.0 # Pa, fuel tank piston pressure loss
+tank_fuel_len = 0.9 # m, fuel tank length, inner length below piston
+tank_fuel_piston_loss = 4e5 # Pa, fuel tank piston pressure loss
 
 # Valves
-valve_ox_cv = 0.8 # flow coefficient of oxidizer run valve
-valve_fuel_cv = 0.8 # flow coefficient of fuel run valve 
+valve_ox_cv = 0.8 # flow coefficient of oxidizer run valve (unused)
+valve_fuel_cv = 0.8 # flow coefficient of fuel run valve (unused)
 
 # Injectors
 inj_ox_number = 12 # number of individual oxidizer orifices
-inj_ox_diam_mm = 2.45 # mm, diameter of one ox orifice
+inj_ox_diam_mm = 2.4 # mm, diameter of one ox orifice
 inj_ox_cd = 0.8 # discharge coefficient oxidizer
 inj_fuel_number = 12 # number of individual fuel orifices
-inj_fuel_diam_mm = 0.85 # mm, diameter of one fuel orifice
+inj_fuel_diam_mm = 0.92 # mm, diameter of one fuel orifice
 inj_fuel_cd = 0.63 # discharge coefficient fuel
 inj_film_number = 6 # number of individual fuel orifices for film cooling
-inj_film_diam_mm = 0.55 # mm, diameter of one fuel orifice for film cooling
+inj_film_diam_mm = 0.5 # mm, diameter of one fuel orifice for film cooling
 inj_film_cd = 0.63 # discharge coefficient fuel for film cooling
 
 # Chamber
-chamber_diam = 0.07 # m, chamber inner diameter
-chamber_length = 0.15 # m, chamber length
+chamber_diam = 0.084 # m, chamber inner diameter
+chamber_length = 0.18 # m, chamber length
 chamber_throat = 0.032 # m, nozzle throat diameter
 chamber_exit = 0.06 # m, nozzle exit diameter
-chamber_cstar_efficiency = 0.85 # factor, combustion efficiency
+chamber_cstar_efficiency = 0.8 # factor, combustion efficiency
 chamber_nozzle_efficiency = 0.95 # factor, expansion efficiency
 
 # Rocket
@@ -341,6 +342,9 @@ for t in range(1, len(sol_t), 1):
     if y[0] <= 0.01 or y[1] <= 0.01 or y[2] < 100: # empty tank or too cold for coolprop
         sol_t = sol_t[:t]
         break
+    # if y[0]+y[1] <= 0.1 or y[2] < 100: # empty tank or too cold for coolprop
+    #     sol_t = sol_t[:t]
+    #     break
     
     sol_y = np.append(sol_y, [y], axis=0)
     sol_ydot = np.append(sol_ydot, [ydot], axis=0)
@@ -350,18 +354,32 @@ for t in range(1, len(sol_t), 1):
     sol_isp = np.append(sol_isp, isp)
     sol_exp = np.append(sol_exp, expans)
 
-### Solution numbers
-print("Burn time:", round(sol_t[-1], 2), "s")
-print("Isp max:", round(max(sol_isp)/9.81, 1), "s") 
-print("Isp avg:", round(sum(sol_isp)/9.81/len(sol_t), 1), "s")     
-print("Thrust max:", round(max(sol_Ft)), "N")
-print("Thrust avg:", round(sum(sol_Ft)/len(sol_t)), "N")
-print("Impulse:", round(sum(sol_Ft)/len(sol_t)*sol_t[-1]/1000, 3), "kNs")
-print("TWR max:", round(max(sol_Ft)/9.81/(rocket_mass_dry+sol_y[0,0]+sol_y[0,1]), 2))
-print("P_chamber max:", round(max(sol_Pc)/1e5, 2), "bar")
-print("P_tank max:", round(max(sol_P)/1e5, 2), "bar")
-print("Ox mass left:", round(sol_y[len(sol_t)-1, 0], 4), "kg")
-print("Fuel mass left:", round(sol_y[len(sol_t)-1, 1], 4), "kg")
+### Design numbers
+des_impulse = sum(sol_Ft)/len(sol_t)*sol_t[-1]
+des_Ft_avg = sum(sol_Ft)/len(sol_t)
+des_Ft_max = max(sol_Ft)
+des_burntime = sol_t[-1]
+des_isp_avg = (sum(sol_Ft)/len(sol_t)*sol_t[-1]) / (9.81*(y0[0]+y0[1]))
+des_isp_max = max(sol_isp)/9.81
+des_twr = max(sol_Ft)/9.81/(rocket_mass_dry+sol_y[0,0]+sol_y[0,1])
+des_Pc_max = max(sol_Pc)/1e5
+des_P_max = max(sol_P)/1e5
+des_massflow_ox = (y0[0] - sol_y[len(sol_t)-1, 0]) / des_burntime
+des_massflow_fuel = (y0[1] - sol_y[len(sol_t)-1, 1]) / des_burntime
+des_of_ratio = des_massflow_ox / des_massflow_fuel
+
+print("Burn time:", round(des_burntime, 2), "s")
+print("Impulse:", round(des_impulse/1000, 3), "kNs")
+print("Thrust avg:", round(des_Ft_avg), "N")
+print("Thrust max:", round(des_Ft_max), "N")
+print("Isp avg:", round(des_isp_avg, 1), "s")     
+print("Isp max:", round(des_isp_max, 1), "s") 
+print("TWR max:", round(des_twr, 2))
+print("P_chamber max:", round(des_Pc_max, 2), "bar")
+print("P_tank max:", round(des_P_max, 2), "bar")
+print("Ox mass flow avg:", round(des_massflow_ox, 4), "kg/s")
+print("Fuel mass flow avg:", round(des_massflow_fuel, 4), "kg/s")
+print("O/F ratio avg:", round(des_of_ratio, 4))
 
 
 
@@ -429,8 +447,15 @@ def calculate_cg(mass_ox, mass_fuel):
 xml_lines = [
     '<engine-database>',
     '\t<engine-list>',
-    f'\t\t<engine mfg="HALO" Type="liquid" code="Static Fire Simulation" auto-calc-cg="0" auto-calc-mass="0" len="{tank_ox_len*1000}" dia="{tank_ox_diam*1000}" initWt="{(y0[0] + y0[1])*1000}" propWt="{(y0[0] + y0[1])*1000}" burn-time="{sol_t[-1]}">',
-    '\n\t\t\t<comments>\n\t\t\t Generated by Finn Breuer \n\t\t\t</comments>\n',
+    f'\t\t <engine mfg="Eos" Type="liquid" code="{rse_code}" auto-calc-cg="0" auto-calc-mass="0" ',
+    f'\t\t len="{tank_ox_len*1000}" dia="{tank_ox_diam*1000}" initWt="{round((y0[0] + y0[1])*1000)}" propWt="{round((y0[0] + y0[1])*1000)}" burn-time="{des_burntime}" ', 
+    f'\t\t Isp="{round(des_isp_avg)}" Itot="{round(des_impulse)}" avgThrust="{round(des_Ft_avg)}" peakThrust="{round(des_Ft_max)}" throatDia="{chamber_throat*1000}" exitDia="{chamber_exit*1000}">',
+    '\n\t\t\t<comments>',
+    f'Nitrous Oxide and {ops_fuel_name}, O/F ratio: {round(des_of_ratio, 4)}',
+    f'Temperature: {ops_temp_celsius} C, Supercharge: {ops_pressurizing_enable}, Heating: {ops_heating_enable}',
+    'Generated by Finn Breuer',
+    'Project Eos of the Hamburg Space Team',
+    '\t\t\t</comments>\n',
     '\t\t\t<data>'
 ]
 
@@ -450,7 +475,7 @@ xml_lines.extend([
 ])
 
 # Save to .rse file
-with open(f'{filename}.rse', 'w') as f:
+with open(f'{rse_filename}.rse', 'w') as f:
     f.write('\n'.join(xml_lines))
 
 "Test"
