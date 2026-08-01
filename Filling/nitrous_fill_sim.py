@@ -45,6 +45,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import CoolProp.CoolProp as CP
 from CoolProp import AbstractState
+from pathlib import Path
+
+OUTPUT_DIR = Path(__file__).resolve().parent
 
 # =====================================================================================
 #  1.  USER INPUTS  --  edit everything in this block
@@ -65,7 +68,7 @@ P_ATM = 1.0e5                    # [Pa]  initial air pressure in line & rocket t
 #   steps.  Filling to a high level is a multi-second physical process for small
 #   orifices; enlarge d_orifice or accept longer runs.
 T_TOTAL = 10.0                  # [s]   total simulated time (+ 10.0 s extension when STOP_ON_ROCKET_FILL enabled)
-DT      = 1.0e-4               # [s]   Euler time step
+DT      = 1.0e-3                # [s]   Euler time step
 RECORD_EVERY = 50             # store/plot every N-th step (keeps memory reasonable)
 PRINT_EVERY = 1000    # print terminal time every N-th step (set to 1 for every step)
 
@@ -74,10 +77,9 @@ T_AMBIENT = 293.15             # [K]   initial temperature of line & rocket-tank
 
 # ---- Reserve (supply) tank ----------------------------------------------------------
 RESERVE = dict(
-    V         = 0.010,         # [m^3]  internal volume (50 L)
-    T         = T_AMBIENT,        # [K]    temperature of stored N2O
-    P         = 5748577.277,   # [Pa]   None -> use saturation pressure at T (self-pressurised)
-    liq_fill  = 1,             # [-]    initial liquid volume fraction (rest is N2O vapour)
+    V         = 0.010,         # [m^3]  bottle internal volume (10 L)
+    mass      = 8.0,           # [kg]   total N2O mass in the bottle
+    T         = T_AMBIENT,     # [K]    initial bottle/N2O temperature
 )
 
 # ---- Rocket tank (vertical concentric annular tank) ------------------------------
@@ -324,6 +326,22 @@ def node_state(mN2O, mair, U, V):
             _, rl, rv, _, _ = sat(T)
             V_liq = mN2O * (1 - Q) / rl
             out.update(V_liq=V_liq, quality=Q, phase="two-phase")
+        elif T < TCRIT:
+            # CoolProp reports Q=-1 for both compressed liquid and gas.  Density
+            # relative to the saturation envelope distinguishes those states.
+            _, rl, rv, _, _ = sat(T)
+            if rho >= rl:
+                out.update(V_liq=V, quality=0.0, phase="liquid")
+            elif rho <= rv:
+                out.update(quality=1.0, phase="gas")
+            else:
+                # Defensive fallback for a state numerically just inside the dome.
+                Q = (1.0 / rho - 1.0 / rl) / (1.0 / rv - 1.0 / rl)
+                Q = float(np.clip(Q, 0.0, 1.0))
+                out.update(V_liq=mN2O * (1.0 - Q) / rl,
+                           quality=Q, phase="two-phase")
+        else:
+            out.update(quality=1.0, phase="supercritical")
         out.update(T=T, P=P, rho=rho, u=u, h=h)
         return out
 
@@ -562,16 +580,24 @@ mN2O = np.zeros(N)
 mair = np.zeros(N)
 U    = np.zeros(N)
 
-# reserve tank: N2O (liquid + vapour) at its temperature
-Tr = RESERVE["T"]
-Psr, rl_r, rv_r, ul_r, uv_r = sat(Tr)
-Vl = RESERVE["liq_fill"] * RESERVE["V"]
-Vv = RESERVE["V"] - Vl
-mliq = rl_r * Vl
-mvap = rv_r * Vv
-mN2O[i_reserve] = mliq + mvap
+# Reserve bottle: its measured volume, N2O mass and temperature uniquely define
+# density and specific internal energy.  Pressure and phase are EOS outputs, not
+# independent inputs.
+Tr = float(RESERVE["T"])
+Vr = float(RESERVE["V"])
+mr = float(RESERVE["mass"])
+if Vr <= 0.0 or mr <= 0.0 or Tr <= 0.0:
+    raise ValueError("RESERVE V, mass and T must all be positive")
+try:
+    _AS.update(CP.DmassT_INPUTS, mr / Vr, Tr)
+    ur = _AS.umass()
+except Exception as exc:
+    raise ValueError(
+        f"Invalid reserve state: V={Vr:g} m^3, mass={mr:g} kg, T={Tr:g} K"
+    ) from exc
+mN2O[i_reserve] = mr
 mair[i_reserve] = 0.0
-U[i_reserve]    = mliq * ul_r + mvap * uv_r
+U[i_reserve]    = mr * ur
 
 # every other node: air at P_ATM, ambient temperature
 for idx, nd in enumerate(nodes):
@@ -582,6 +608,12 @@ for idx, nd in enumerate(nodes):
     mair[idx] = rho_a * nd["V"]
     mN2O[idx] = 0.0
     U[idx]    = mair[idx] * CV_AIR * T0
+
+reserve_initial = node_state(mN2O[i_reserve], mair[i_reserve], U[i_reserve], Vr)
+print("Initial reserve state: "
+      f"{reserve_initial['P']/1e5:.3f} bar, {reserve_initial['T']:.2f} K, "
+      f"rho={mr/Vr:.2f} kg/m^3, phase={reserve_initial['phase']}, "
+      f"liquid volume={100.0*reserve_initial['V_liq']/Vr:.2f}%")
 
 # =====================================================================================
 #  8.  TIME INTEGRATION  (explicit Euler)
@@ -764,23 +796,29 @@ print(f"\nRocket-tank liquid level: {rec_level[-1]*1000:.1f} mm "
       f"({rec_level[-1]/ROCKET['H']*100:.1f} % of height)")
 print(f"N2O delivered to rocket tank: {mN2O[i_rocket]:.4f} kg")
 
-# ---- Figure 1: pressures ----
-fig1, ax1 = plt.subplots(figsize=(10, 6))
-for k in plot_idx:
-    ax1.plot(rec_t, rec_P[:, k] / 1e5, label=name[k])
-ax1.set_xlabel("time [s]"); ax1.set_ylabel("pressure [bar]")
-ax1.set_title("Pressure in pipes and rocket tank")
-ax1.grid(True, alpha=0.3); ax1.legend(ncol=2, fontsize=9)
-fig1.tight_layout(); fig1.savefig("fill_pressures.png", dpi=130)
+# ---- Figure 1: pressure dashboard ----
+fig1, axs1 = plt.subplots(len(plot_idx), 1, figsize=(10, 13), sharex=True)
+for ax, k in zip(axs1, plot_idx):
+    ax.plot(rec_t, rec_P[:, k] / 1e5, color=f"C{plot_idx.index(k)}")
+    ax.set_ylabel("pressure [bar]")
+    ax.set_title(name[k])
+    ax.grid(True, alpha=0.3)
+axs1[-1].set_xlabel("time [s]")
+fig1.suptitle("Pressure in pipes and rocket tank")
+fig1.tight_layout(rect=[0, 0, 1, 0.98])
+fig1.savefig(OUTPUT_DIR / "fill_pressures.png", dpi=130)
 
-# ---- Figure 2: temperatures ----
-fig2, ax2 = plt.subplots(figsize=(10, 6))
-for k in plot_idx:
-    ax2.plot(rec_t, rec_T[:, k], label=name[k])
-ax2.set_xlabel("time [s]"); ax2.set_ylabel("temperature [K]")
-ax2.set_title("Temperature in pipes and rocket tank")
-ax2.grid(True, alpha=0.3); ax2.legend(ncol=2, fontsize=9)
-fig2.tight_layout(); fig2.savefig("fill_temperatures.png", dpi=130)
+# ---- Figure 2: temperature dashboard ----
+fig2, axs2 = plt.subplots(len(plot_idx), 1, figsize=(10, 13), sharex=True)
+for ax, k in zip(axs2, plot_idx):
+    ax.plot(rec_t, rec_T[:, k], color=f"C{plot_idx.index(k)}")
+    ax.set_ylabel("temperature [K]")
+    ax.set_title(name[k])
+    ax.grid(True, alpha=0.3)
+axs2[-1].set_xlabel("time [s]")
+fig2.suptitle("Temperature in pipes and rocket tank")
+fig2.tight_layout(rect=[0, 0, 1, 0.98])
+fig2.savefig(OUTPUT_DIR / "fill_temperatures.png", dpi=130)
 
 # ---- Figure 3: rocket-tank liquid level ----
 fig3, ax3 = plt.subplots(figsize=(10, 5))
@@ -788,7 +826,7 @@ ax3.plot(rec_t, rec_level * 1000.0, color="tab:blue")
 ax3.set_xlabel("time [s]"); ax3.set_ylabel("liquid level [mm]")
 ax3.set_title("Rising N2O liquid level in the rocket tank")
 ax3.grid(True, alpha=0.3)
-fig3.tight_layout(); fig3.savefig("fill_level.png", dpi=130)
+fig3.tight_layout(); fig3.savefig(OUTPUT_DIR / "fill_level.png", dpi=130)
 
 # ---- Figure 4: valve mass flows ----
 rec_mdot_valve = [np.asarray(mdot_series, dtype=float) for mdot_series in rec_mdot_valve]
@@ -803,18 +841,22 @@ for vi, ax in enumerate(axs4):
     ax.grid(True, alpha=0.3)
 axs4[-1].set_xlabel("time [s]")
 fig4.tight_layout(rect=[0, 0, 1, 0.96])
-fig4.savefig("fill_valveflow.png", dpi=130)
+fig4.savefig(OUTPUT_DIR / "fill_valveflow.png", dpi=130)
 
-# ---- Figure 5: valve positions (0=closed, 1=open) ----
+# ---- Figure 5: valve-position dashboard (0=closed, 1=open) ----
 rec_valve_pos = np.array([[1.0 if valve_is_open(vi, t) else 0.0 for t in rec_t] for vi in range(5)])
-fig5, ax5 = plt.subplots(figsize=(10, 3))
-for vi in range(5):
-    ax5.step(rec_t, rec_valve_pos[vi, :], where='post', label=f"valve{vi+1}")
-ax5.set_xlabel("time [s]"); ax5.set_ylabel("position")
-ax5.set_title("Valve open/closed schedule (1=open, 0=closed)")
-ax5.set_ylim(-0.1, 1.1)
-ax5.grid(True, alpha=0.3); ax5.legend(ncol=5, fontsize=9)
-fig5.tight_layout(); fig5.savefig("fill_valvepos.png", dpi=130)
+fig5, axs5 = plt.subplots(5, 1, figsize=(10, 10), sharex=True)
+for vi, ax in enumerate(axs5):
+    ax.step(rec_t, rec_valve_pos[vi, :], where="post", color=f"C{vi}")
+    ax.set_ylabel("position")
+    ax.set_title(f"Valve {vi+1}")
+    ax.set_ylim(-0.1, 1.1)
+    ax.set_yticks([0, 1])
+    ax.grid(True, alpha=0.3)
+axs5[-1].set_xlabel("time [s]")
+fig5.suptitle("Valve open/closed schedule (1=open, 0=closed)")
+fig5.tight_layout(rect=[0, 0, 1, 0.97])
+fig5.savefig(OUTPUT_DIR / "fill_valvepos.png", dpi=130)
 
 plt.show()
-print("\nSaved: fill_pressures.png, fill_temperatures.png, fill_level.png, fill_valveflow.png, fill_valvepos.png")
+print(f"\nSaved plots in: {OUTPUT_DIR}")
