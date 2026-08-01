@@ -66,8 +66,8 @@ P_ATM = 1.0e5                    # [Pa]  initial air pressure in line & rocket t
 #   flash is the cost).  ~4 ms/step here -> a few minutes for tens of thousands of
 #   steps.  Filling to a high level is a multi-second physical process for small
 #   orifices; enlarge d_orifice or accept longer runs.
-T_TOTAL = 10.0                  # [s]   total simulated time (+ 10.0 s extension when STOP_ON_ROCKET_FILL enabled)
-DT      = 1.0e-4                # [s]   Euler time step
+T_TOTAL = 20.0                  # [s]   total simulated time (+ 10.0 s extension when STOP_ON_ROCKET_FILL enabled)
+DT      = 2.0e-4                # [s]   Euler time step
 RECORD_EVERY = 20             # store/plot every N-th step (keeps memory reasonable)
 PRINT_EVERY = 1000    # print terminal time every N-th step (set to 1 for every step)
 
@@ -123,9 +123,9 @@ VALVES = [
 #  NOTE: When STOP_ON_ROCKET_FILL is enabled, valves 1-4 close 0.5s after rocket fill target is reached.
 VALVE_SCHEDULE = [
     [(0.0, 1)],                # valve1 (closes 0.5s after fill target reached if STOP_ON_ROCKET_FILL enabled)
-    [(0.0, 0), (0.5, 1)],     # valve2 (closes 0.5s after fill target reached if STOP_ON_ROCKET_FILL enabled)
+    [(0.0, 1)],     # valve2 (closes 0.5s after fill target reached if STOP_ON_ROCKET_FILL enabled)
     [(0.0, 0), (1.0, 1)],     # valve3 (closes 0.5s after fill target reached if STOP_ON_ROCKET_FILL enabled)
-    [(0.0, 0), (1.5, 1)],     # valve4 (closes 0.5s after fill target reached if STOP_ON_ROCKET_FILL enabled)
+    [(0.0, 1)],     # valve4 (closes 0.5s after fill target reached if STOP_ON_ROCKET_FILL enabled)
     [(0.0, 1)],                # valve5
 ]
 
@@ -434,6 +434,87 @@ def _n2o_PQh(rho, T):
 #  5.  BRANCH FLOW MODELS
 # =====================================================================================
 
+def phase_inventory(s):
+    """Return the liquid and vapour N2O masses represented by a node state."""
+    if s["phase"] == "two-phase":
+        mvap = s["mN2O"] * float(np.clip(s["quality"], 0.0, 1.0))
+        return s["mN2O"] - mvap, mvap
+    if s["phase"] == "liquid":
+        return s["mN2O"], 0.0
+    return 0.0, s["mN2O"]
+
+
+def branch_port_mode(node_idx, b):
+    """Return the permanently configured outlet type at a tank connection."""
+    if node_idx == i_reserve and b["kind"] == "orifice" and b.get("valve") == 0:
+        return "bottom"
+    if node_idx == i_rocket:
+        if b["kind"] == "orifice" and b.get("valve") == 4:
+            return "dip_tube"
+        # The only other rocket connection is the bottom inlet from pipe 4.
+        return "bottom"
+    return "bulk"
+
+
+def outlet_stream(s, node_idx, b):
+    """Select the phase, composition and enthalpy withdrawn through a branch port.
+
+    Returns (flow_state, fN2O, fair, h, available_N2O, available_air, label).
+    The flow_state is used by the hydraulic model; the remaining values are used
+    for conservative species and energy transport.
+    """
+    mode = branch_port_mode(node_idx, b)
+    if mode == "bulk":
+        fN = s["mN2O"] / max(s["mtot"], 1e-30)
+        return s, fN, 1.0 - fN, s["h"], s["mN2O"], s["mair"], "bulk"
+
+    mliq, mvap = phase_inventory(s)
+    if mode == "dip_tube":
+        liquid_at_tip = s["V_liq"] / s["V"] >= ROCKET_LIQUID_TARGET
+        requested_phase = "liquid" if liquid_at_tip else "gas"
+    else:
+        requested_phase = "liquid" if mliq > M_FLOOR else "gas"
+
+    Ps, rl, rv, ul, uv = sat(s["T"])
+    hl = ul + Ps / rl
+    hv = uv + Ps / rv
+
+    if requested_phase == "liquid" and mliq > M_FLOOR:
+        flow = dict(s)
+        # A homogeneous compressed-liquid node already has the appropriate
+        # enthalpy and density; a two-phase node withdraws saturated liquid.
+        pure_compressed = s["phase"] == "liquid" and s["mair"] <= M_FLOOR
+        h = s["h"] if pure_compressed else hl
+        rho = s["mN2O"] / s["V"] if pure_compressed else rl
+        flow.update(mN2O=mliq, mair=0.0, mtot=mliq, rho=rho, h=h,
+                    phase="liquid", quality=0.0)
+        return flow, 1.0, 0.0, h, mliq, 0.0, "liquid"
+
+    # Ullage withdrawal contains all air and only the N2O vapour inventory.
+    mgas = mvap + s["mair"]
+    if mgas <= M_FLOOR and mliq > M_FLOOR:
+        # Defensive fallback for a nominal gas port after the gas inventory has
+        # numerically vanished.
+        flow = dict(s)
+        flow.update(mN2O=mliq, mair=0.0, mtot=mliq, rho=rl, h=hl,
+                    phase="liquid", quality=0.0)
+        return flow, 1.0, 0.0, hl, mliq, 0.0, "liquid"
+
+    fN = mvap / max(mgas, 1e-30)
+    Vgas = max(s["V"] - s["V_liq"], 1e-12)
+    h_n2o_gas = hv
+    if mvap > M_FLOOR and s["phase"] != "two-phase":
+        try:
+            _AS.update(CP.DmassT_INPUTS, mvap / Vgas, s["T"])
+            h_n2o_gas = _AS.hmass()
+        except Exception:
+            pass
+    h = (mvap * h_n2o_gas + s["mair"] * CP_AIR * s["T"]) / max(mgas, 1e-30)
+    flow = dict(s)
+    flow.update(mN2O=mvap, mair=s["mair"], mtot=mgas, V=Vgas,
+                rho=mgas / Vgas, h=h, phase="gas", quality=1.0)
+    return flow, fN, 1.0 - fN, h, mvap, s["mair"], "gas"
+
 def darcy_f(Re, D, roughness):
     """Darcy friction factor via Haaland (turbulent) or laminar 64/Re."""
     if Re < 1.0:
@@ -450,7 +531,9 @@ def friction_flow(b, si, sj):
     dP = Pi - Pj
     if abs(dP) < 1.0:
         return 0.0
-    up = si if dP > 0 else sj
+    up_idx = b["i"] if dP > 0 else b["j"]
+    up_bulk = si if dP > 0 else sj
+    up = outlet_stream(up_bulk, up_idx, b)[0]
     rho = max(up["rho"], 1e-4)
     A_ref = b["A"]
     segments = b["segments"]
@@ -490,7 +573,9 @@ def orifice_flow(b, si, sj, valve_open):
     if abs(Pi - Pj) < 1.0:
         return 0.0, False
     forward = Pi > Pj
-    up = si if forward else sj
+    up_idx = b["i"] if forward else b["j"]
+    up_bulk = si if forward else sj
+    up = outlet_stream(up_bulk, up_idx, b)[0]
     P_up = up["P"]
     P_dn = sj["P"] if forward else si["P"]
     xN2O = up["mN2O"] / max(up["mtot"], 1e-30)
@@ -714,19 +799,24 @@ for step in range(nsteps + 1):
                 valve_mdot[b["valve"]] = 0.0
             continue
 
-        # upstream node (source of mass & enthalpy)
-        up = si if mdot > 0 else sj
+        # Select the phase exposed at the actual upstream port.  Tank ports are
+        # permanently configured as bottom outlets or as the rocket dip tube.
+        up_idx = i if mdot > 0 else j
+        up_bulk = si if mdot > 0 else sj
+        up, fN, fA, h_up, available_N, available_A, _stream_phase = \
+            outlet_stream(up_bulk, up_idx, b)
         m_up = abs(mdot)
-        # outflow limiter: don't drain more than a fraction of upstream species per step
-        cap = MAX_DRAIN * max(up["mtot"], M_FLOOR) / DT
-        if m_up > cap:
-            m_up = cap
-        # split by upstream mass fractions (homogeneous assumption)
-        fN = up["mN2O"] / max(up["mtot"], 1e-30)
-        fA = 1.0 - fN
+        # Limit against the inventory of the selected phase, not the tank's bulk
+        # mass.  This prevents a liquid port from draining vapour or vice versa.
+        caps = []
+        if fN > 0.0:
+            caps.append(MAX_DRAIN * available_N / (fN * DT))
+        if fA > 0.0:
+            caps.append(MAX_DRAIN * available_A / (fA * DT))
+        if caps:
+            m_up = min(m_up, min(caps))
         mN = m_up * fN
         mA = m_up * fA
-        h_up = up["h"]
         sgn = 1.0 if mdot > 0 else -1.0
         actual_mdot = sgn * m_up
         branch_mdot_prev[bi] = actual_mdot
