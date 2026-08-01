@@ -10,7 +10,7 @@
 
  Physics / methods
  -----------------
- * Every pipe, valve section and tank is a control volume (CV / "node") with two
+ * Every pipe and tank is a control volume (CV / "node") with two
    conserved quantities per species and one energy quantity:  m_N2O, m_air, U.
  * Fluid properties for N2O come from CoolProp (Helmholtz EOS, real fluid,
    two-phase capable).  The residual air that initially fills the line is treated
@@ -33,7 +33,7 @@
  Flow path (as requested):
    reserve tank -> valve1 -> pipe1 -> valve2 -> pipe2 -> valve3 -> pipe3
                 -> valve4 -> pipe4 -> rocket tank -> valve5
- Each valve = [small pipe section A] --[orifice]-- [small pipe section B].
+ Each valve is a zero-volume flow branch between adjacent control volumes.
 
  Outputs: time histories of pressure and temperature in every pipe, every valve
  and the rocket tank, plus the rising liquid level in the rocket tank, the position
@@ -60,17 +60,21 @@ P_ATM = 1.0e5                    # [Pa]  initial air pressure in line & rocket t
 # ---- Simulation control -------------------------------------------------------------
 # STABILITY / PERFORMANCE NOTE:
 #   Explicit Euler on compressible flow in small volumes is only conditionally stable.
-#   The limiting volumes are the tiny valve sections, so DT must be small.
-#   DT = 1e-4 s is stable for the default geometry.  If you see "NUMERICAL
-#   INSTABILITY", NaNs, or wild oscillations, reduce DT (try 5e-5 or 2e-5).
+#   The shortest pipe control volume normally sets the limiting time scale.  If you
+#   see "NUMERICAL INSTABILITY", NaNs, or wild oscillations, reduce DT.
 #   Runtime scales with steps AND with how many valves pass two-phase N2O (the HEM
 #   flash is the cost).  ~4 ms/step here -> a few minutes for tens of thousands of
 #   steps.  Filling to a high level is a multi-second physical process for small
 #   orifices; enlarge d_orifice or accept longer runs.
 T_TOTAL = 10.0                  # [s]   total simulated time (+ 10.0 s extension when STOP_ON_ROCKET_FILL enabled)
-DT      = 1.0e-3                # [s]   Euler time step
-RECORD_EVERY = 50             # store/plot every N-th step (keeps memory reasonable)
+DT      = 1.0e-4                # [s]   Euler time step
+RECORD_EVERY = 20             # store/plot every N-th step (keeps memory reasonable)
 PRINT_EVERY = 1000    # print terminal time every N-th step (set to 1 for every step)
+
+# ---- Branch-flow numerical relaxation ----------------------------------------------
+# First-order damping of jumps in the quasi-steady branch-flow solutions.  This is a
+# numerical time constant, not a measured valve or pipe property; set to 0 to disable.
+FLOW_TAU = 0.010               # [s]
 
 # ---- Ambient / initial line temperature ---------------------------------------------
 T_AMBIENT = 293.15             # [K]   initial temperature of line & rocket-tank air
@@ -87,28 +91,29 @@ ROCKET = dict(
     D_outer = 0.104,          # [m]  outer diameter of the concentric annulus
     D_inner = 0.050,          # [m]  inner diameter of the concentric annulus
     H = 1.000,                # [m]  height
+    dip_tube_L = 0.150,       # [m]  dip-tube insertion length measured down from the top
     T = T_AMBIENT,            # [K]  initial air temperature
 )
 
 # ---- Main pipes 1..4  (circular) ----------------------------------------------------
-#  length [m], inner diameter [m]
+#  length [m], inner diameter [m], Darcy equivalent sand roughness [m]
 PIPES = [
-    dict(L=0.10, D=0.010),     # pipe1
-    dict(L=5.00, D=0.010),     # pipe2
-    dict(L=1.50, D=0.010),     # pipe3
-    dict(L=0.10, D=0.010),     # pipe4
+    dict(L=1.50, D=0.010, roughness=1.5e-6),   # pipe1: smooth PTFE hose
+    dict(L=0.50, D=0.010, roughness=4.0e-6),   # pipe2: GSE panel piping
+    dict(L=5.00, D=0.010, roughness=1.5e-6),   # pipe3: smooth PTFE hose
+    dict(L=0.10, D=0.010, roughness=50.0e-6),  # pipe4: nominal as-printed aluminium
 ]
 
 # ---- Valves 1..5 --------------------------------------------------------------------
-#  Each valve is two small pipe sections (sec_L, sec_D) around an orifice (d_orifice).
+#  Each valve is a zero-volume orifice between adjacent control volumes.
 #  Kv  = valve flow coefficient (metric units, m^3/h at 1 bar) -> used as a single-phase limit.
 #  Cd  = orifice discharge coefficient (dimensionless, ~0.6-0.85).
 VALVES = [
-    dict(Kv=3.00, d_orifice=0.0100, Cd=0.80, sec_L=0.02, sec_D=0.010),  # valve1
-    dict(Kv=1.50, d_orifice=0.0100, Cd=0.65, sec_L=0.02, sec_D=0.010),  # valve2
-    dict(Kv=2.00, d_orifice=0.0100, Cd=0.80, sec_L=0.02, sec_D=0.010),  # valve3
-    dict(Kv=1.60, d_orifice=0.0100, Cd=0.80, sec_L=0.02, sec_D=0.010),  # valve4
-    dict(Kv=0.10, d_orifice=0.0010, Cd=0.60, sec_L=0.01, sec_D=0.001),  # valve5
+    dict(Kv=3.00, d_orifice=0.0100, Cd=0.80),  # valve1
+    dict(Kv=1.50, d_orifice=0.0100, Cd=0.65),  # valve2
+    dict(Kv=2.00, d_orifice=0.0100, Cd=0.80),  # valve3
+    dict(Kv=1.60, d_orifice=0.0100, Cd=0.80),  # valve4
+    dict(Kv=0.50, d_orifice=0.0020, Cd=0.60),  # valve5
 ]
 
 # ---- Valve schedules ----------------------------------------------------------------
@@ -126,16 +131,16 @@ VALVE_SCHEDULE = [
 
 # ---- Stopping criteria --------------------------------------------------------------
 #  When STOP_ON_ROCKET_FILL is enabled, the simulation will continue until the rocket tank
-#  liquid volume fraction reaches ROCKET_FILL_TARGET, then all valves 1-4 will close after
-#  0.5s and the simulation will continue for 10s more to observe the pressure decay in the
-#  rocket tank.
+#  liquid reaches the dip-tube tip.  The remaining ullage-height fraction is therefore
+#  dip_tube_L / H.  Valves 1-4 then close after 0.5s and the simulation continues for
+#  10s more to observe the pressure decay in the rocket tank.
 #  NOTE: When T_TOTAL is reached, the simulation will stop regardless of the rocket fill level.
 
 STOP_ON_ROCKET_FILL = True    # [bool] enable/disable rocket fill stopping condition
-ROCKET_FILL_TARGET = 0.15      # [-]    rocket tank liquid volume fraction required to end simulation
-
-# ---- Pipe wall roughness (for friction factor) --------------------------------------
-ROUGHNESS = 1.5e-6             # [m]  absolute roughness (drawn tubing ~1.5 um)
+if not 0.0 <= ROCKET["dip_tube_L"] <= ROCKET["H"]:
+    raise ValueError("ROCKET dip_tube_L must be between zero and the tank height H")
+ROCKET_ULLAGE_TARGET = ROCKET["dip_tube_L"] / ROCKET["H"]
+ROCKET_LIQUID_TARGET = 1.0 - ROCKET_ULLAGE_TARGET
 
 # ---- Air (ideal gas) properties -----------------------------------------------------
 R_AIR   = 287.05               # [J/(kg K)]
@@ -180,34 +185,30 @@ def n2o_Psat(T):
 # =====================================================================================
 #  3.  NETWORK TOPOLOGY  (nodes and branches)
 # =====================================================================================
-#  Node types: 'reservoir' (tanks), 'pipe', 'vsec' (valve small section)
-#  Branch kinds: 'friction' (Darcy-Weisbach) or 'orifice' (valve, HEM/gas + Cv + choke)
+#  Node types: 'reservoir' (tanks) or 'pipe'.
+#  Branch kinds: 'friction' (Darcy-Weisbach) or 'orifice' (valve, HEM/gas + Kv + choke).
 
 nodes   = []     # list of dicts: name,type,V,L,D, (rocket: A_cross)
 branches = []    # list of dicts describing each connection
 
 
-def add_node(name, ntype, V, L=0.0, D=0.0, A_cross=None):
-    nodes.append(dict(name=name, type=ntype, V=V, L=L, D=D, A_cross=A_cross))
+def add_node(name, ntype, V, L=0.0, D=0.0, roughness=0.0, A_cross=None):
+    nodes.append(dict(name=name, type=ntype, V=V, L=L, D=D,
+                      roughness=roughness, A_cross=A_cross))
     return len(nodes) - 1
 
 
 # --- reserve tank ---
 i_reserve = add_node("reserve", "reservoir", RESERVE["V"])
 
-# --- build the alternating chain of valves and pipes ---
+# --- build the alternating chain of zero-volume valves and pipe control volumes ---
 prev = i_reserve
 for k in range(4):
-    v = VALVES[k]
-    Vs = np.pi / 4.0 * v["sec_D"] ** 2 * v["sec_L"]
-    va = add_node(f"v{k+1}a", "vsec", Vs, L=v["sec_L"], D=v["sec_D"])
-    vb = add_node(f"v{k+1}b", "vsec", Vs, L=v["sec_L"], D=v["sec_D"])
-    branches.append(dict(kind="friction", i=prev, j=va))
-    branches.append(dict(kind="orifice", i=va, j=vb, valve=k))
     p = PIPES[k]
     Vp = np.pi / 4.0 * p["D"] ** 2 * p["L"]
-    ip = add_node(f"pipe{k+1}", "pipe", Vp, L=p["L"], D=p["D"])
-    branches.append(dict(kind="friction", i=vb, j=ip))
+    ip = add_node(f"pipe{k+1}", "pipe", Vp, L=p["L"], D=p["D"],
+                  roughness=p["roughness"])
+    branches.append(dict(kind="orifice", i=prev, j=ip, valve=k))
     prev = ip
 
 # --- rocket tank ---
@@ -216,38 +217,39 @@ V_rocket = A_cross * ROCKET["H"]
 i_rocket = add_node("rocket", "reservoir", V_rocket, A_cross=A_cross)
 branches.append(dict(kind="friction", i=prev, j=i_rocket))
 
-# --- vent valve ---
-v = VALVES[4]
-Vs = np.pi / 4.0 * v["sec_D"] ** 2 * v["sec_L"]
-v5a = add_node("v5a", "vsec", Vs, L=v["sec_L"], D=v["sec_D"])
-v5b = add_node("v5b", "vsec", Vs, L=v["sec_L"], D=v["sec_D"])
-branches.append(dict(kind="friction", i=i_rocket, j=v5a))
-branches.append(dict(kind="orifice", i=v5a, j=v5b, valve=4))
+# --- zero-volume vent valve and ambient boundary ---
 i_vent = add_node("vent", "reservoir", 1.0e6)
-branches.append(dict(kind="friction", i=v5b, j=i_vent))
+branches.append(dict(kind="orifice", i=i_rocket, j=i_vent, valve=4))
 
 N = len(nodes)
 
-# Pre-compute friction-branch geometry (symmetric half-length split; tanks add loss only)
+# Pre-compute the pipe resistance assigned to each branch.  A branch receives half
+# the length of each adjacent pipe, so every pipe's complete length is represented
+# across its two connections.  Reservoir connections add an entrance/exit loss.
 for b in branches:
-    if b["kind"] != "friction":
-        continue
     ni, nj = nodes[b["i"]], nodes[b["j"]]
     # limiting diameter / area
     Ds = [d for d in (ni["D"], nj["D"]) if d > 0]
     D_b = min(Ds) if Ds else 0.01
     b["A"] = np.pi / 4.0 * D_b ** 2
     b["D"] = D_b
-    # each conduit contributes half its length; reservoirs contribute none
+    # Each pipe contributes a separate half-length segment so its own diameter
+    # and surface roughness are retained in the Darcy calculation.
     L_b = 0.0
     K_minor = 0.0
+    segments = []
     for nd in (ni, nj):
-        if nd["type"] in ("pipe", "vsec"):
-            L_b += 0.5 * nd["L"]
+        if nd["type"] == "pipe":
+            seg_L = 0.5 * nd["L"]
+            L_b += seg_L
+            segments.append(dict(L=seg_L, D=nd["D"],
+                                 A=np.pi / 4.0 * nd["D"] ** 2,
+                                 roughness=nd["roughness"]))
         else:
             K_minor += 0.75          # tank entrance/exit loss
     b["L"] = L_b
     b["K_minor"] = K_minor
+    b["segments"] = segments
 
 
 # =====================================================================================
@@ -432,13 +434,13 @@ def _n2o_PQh(rho, T):
 #  5.  BRANCH FLOW MODELS
 # =====================================================================================
 
-def darcy_f(Re, D):
+def darcy_f(Re, D, roughness):
     """Darcy friction factor via Haaland (turbulent) or laminar 64/Re."""
     if Re < 1.0:
         return 0.0
     if Re < 2300.0:
         return 64.0 / Re
-    rr = ROUGHNESS / D
+    rr = roughness / D
     return (-1.8 * np.log10((rr / 3.7) ** 1.11 + 6.9 / Re)) ** -2
 
 
@@ -450,17 +452,25 @@ def friction_flow(b, si, sj):
         return 0.0
     up = si if dP > 0 else sj
     rho = max(up["rho"], 1e-4)
-    A, D, L = b["A"], b["D"], b["L"]
-    # iterate friction factor with an internal velocity estimate
+    A_ref = b["A"]
+    segments = b["segments"]
+    # Iterate friction factors using the common mass flow.  Segment velocities
+    # differ when adjacent pipes have different diameters; their losses are
+    # expressed relative to the limiting branch area A_ref.
     mu = 2.0e-5
-    f = 0.02
-    v = 0.0
+    fs = [0.02] * len(segments)
+    v_ref = 0.0
     for _ in range(3):
-        K = f * L / max(D, 1e-6) + b["K_minor"] + 1e-6
-        v = np.sqrt(2.0 * abs(dP) / (rho * K))
-        Re = rho * v * D / mu
-        f = darcy_f(Re, D)
-    mdot = rho * A * v
+        K = b["K_minor"] + 1e-6
+        for f, seg in zip(fs, segments):
+            area_ratio = A_ref / seg["A"]
+            K += f * seg["L"] / max(seg["D"], 1e-6) * area_ratio ** 2
+        v_ref = np.sqrt(2.0 * abs(dP) / (rho * K))
+        mdot_guess = rho * A_ref * v_ref
+        fs = [darcy_f(mdot_guess * seg["D"] / (mu * seg["A"]),
+                      seg["D"], seg["roughness"])
+              for seg in segments]
+    mdot = rho * A_ref * v_ref
     return mdot if dP > 0 else -mdot
 
 
@@ -493,6 +503,11 @@ def orifice_flow(b, si, sj, valve_open):
     mdot = Cd * A * G
     kv = v.get("Kv", v.get("Cv", 0.0))
     mdot = min(mdot, kv_limit(kv, abs(P_up - P_dn), up["rho"]))
+    # The valve branch also carries the resistance of the adjacent pipe halves.
+    # Keep that resistance after removing the artificial valve-section volumes.
+    pipe_mdot = abs(friction_flow(b, si, sj))
+    if pipe_mdot > 0.0:
+        mdot = min(mdot, pipe_mdot)
     mdot = max(mdot, 0.0)
     return (mdot, choked) if forward else (-mdot, choked)
 
@@ -628,11 +643,14 @@ rec_t = []
 rec_P = []          # [step][node]
 rec_T = []
 rec_level = []
+rec_reserve_mass = []
+rec_rocket_mass = []
 rec_mdot_valve = [[] for _ in range(5)]
 choke_events = []            # (t, valve_idx) onset events
 choke_active = [False] * 5   # current choke state per valve (for edge detection)
 choke_steps  = [0] * 5       # number of recorded steps each valve was choked
 choke_first  = [None] * 5    # first time each valve choked
+branch_mdot_prev = np.zeros(len(branches))  # flow actually used on the prior step
 
 # map orifice branch index -> valve number
 orifice_branches = {b["valve"]: bi for bi, b in enumerate(branches) if b["kind"] == "orifice"}
@@ -643,7 +661,7 @@ for step in range(nsteps + 1):
     if PRINT_EVERY and (step % max(1, PRINT_EVERY) == 0):
         print(f"\rSim time: {t:8.4f} s", end='', flush=True)
 
-    # monitor sustained rocket fill condition: 15% volume for 0.5 s
+    # monitor the sustained dip-tube fill condition
     if step == 0:
         _sustain_time = 0.0
 
@@ -656,16 +674,17 @@ for step in range(nsteps + 1):
     dU    = np.zeros(N)
     valve_mdot = [0.0] * 5
 
-    for b in branches:
+    for bi, b in enumerate(branches):
         i, j = b["i"], b["j"]
         si, sj = states[i], states[j]
         if b["kind"] == "friction":
-            mdot = friction_flow(b, si, sj)
+            mdot_target = friction_flow(b, si, sj)
             choked = False
+            valve_open = True
         else:
             vidx = b["valve"]
-            mdot, choked = orifice_flow(b, si, sj, valve_is_open(vidx, t))
-            valve_mdot[vidx] = mdot
+            valve_open = valve_is_open(vidx, t)
+            mdot_target, choked = orifice_flow(b, si, sj, valve_open)
             if choked:
                 choke_steps[vidx] += 1
                 if choke_first[vidx] is None:
@@ -678,7 +697,21 @@ for step in range(nsteps + 1):
             else:
                 choke_active[vidx] = False
 
+        # Backward-Euler first-order filter.  A valve closure overrides the
+        # relaxation state so flow cannot persist through a closed valve.
+        if b["kind"] == "orifice" and not valve_open:
+            mdot = 0.0
+            branch_mdot_prev[bi] = 0.0
+        elif FLOW_TAU > 0.0:
+            alpha = DT / (FLOW_TAU + DT)
+            mdot = branch_mdot_prev[bi] + alpha * (mdot_target - branch_mdot_prev[bi])
+        else:
+            mdot = mdot_target
+
         if mdot == 0.0:
+            branch_mdot_prev[bi] = 0.0
+            if b["kind"] == "orifice":
+                valve_mdot[b["valve"]] = 0.0
             continue
 
         # upstream node (source of mass & enthalpy)
@@ -695,6 +728,10 @@ for step in range(nsteps + 1):
         mA = m_up * fA
         h_up = up["h"]
         sgn = 1.0 if mdot > 0 else -1.0
+        actual_mdot = sgn * m_up
+        branch_mdot_prev[bi] = actual_mdot
+        if b["kind"] == "orifice":
+            valve_mdot[b["valve"]] = actual_mdot
 
         # apply to i (positive mdot leaves i) and j
         dmN2O[i] -= sgn * mN
@@ -710,19 +747,26 @@ for step in range(nsteps + 1):
         rec_P.append([s["P"] for s in states])
         rec_T.append([s["T"] for s in states])
         rec_level.append(states[i_rocket]["V_liq"] / nodes[i_rocket]["A_cross"])
+        rec_reserve_mass.append(mN2O[i_reserve])
+        rec_rocket_mass.append(mN2O[i_rocket])
         for vi in range(5):
             rec_mdot_valve[vi].append(valve_mdot[vi])
 
-    # check finish condition: sustained liquid fraction >= target for 0.5 s
+    # Check whether the liquid has reached the dip-tube tip for 0.5 s.  The
+    # annular tank has constant cross-sectional area, so height and volume
+    # fractions are identical.
     if STOP_ON_ROCKET_FILL:
         rocket_liq_frac = states[i_rocket]["V_liq"] / nodes[i_rocket]["V"]
-        if rocket_liq_frac >= ROCKET_FILL_TARGET:
+        if rocket_liq_frac >= ROCKET_LIQUID_TARGET:
             _sustain_time += DT
         else:
             _sustain_time = 0.0
         if _sustain_time >= 0.5:
-            # Close valves 1-4 after fill target sustained for 0.5s and continue for 10 more seconds
-            print(f"Rocket liquid fraction >={ROCKET_FILL_TARGET*100:.1f}% for {_sustain_time:.3f} s at t={t:.4f}s")
+            # Close valves 1-4 after the dip-tube level is sustained for 0.5s.
+            print(f"Rocket liquid reached the dip-tube tip "
+                  f"({ROCKET_LIQUID_TARGET*100:.1f}% liquid, "
+                  f"{ROCKET_ULLAGE_TARGET*100:.1f}% ullage) for "
+                  f"{_sustain_time:.3f} s at t={t:.4f}s")
             print(f"Closing valves 1-4, continuing simulation for 10 more seconds...")
             # Dynamically add close events for valves 1-4 at current time
             for vi in range(4):
@@ -766,6 +810,8 @@ rec_t = np.array(rec_t)
 rec_P = np.array(rec_P)          # [nt, N]
 rec_T = np.array(rec_T)
 rec_level = np.array(rec_level)
+rec_reserve_mass = np.array(rec_reserve_mass)
+rec_rocket_mass = np.array(rec_rocket_mass)
 
 name = [nd["name"] for nd in nodes]
 plot_nodes = ["reserve"] + [f"pipe{k+1}" for k in range(4)] + ["rocket"]
@@ -820,13 +866,32 @@ fig2.suptitle("Temperature in pipes and rocket tank")
 fig2.tight_layout(rect=[0, 0, 1, 0.98])
 fig2.savefig(OUTPUT_DIR / "fill_temperatures.png", dpi=130)
 
-# ---- Figure 3: rocket-tank liquid level ----
-fig3, ax3 = plt.subplots(figsize=(10, 5))
-ax3.plot(rec_t, rec_level * 1000.0, color="tab:blue")
-ax3.set_xlabel("time [s]"); ax3.set_ylabel("liquid level [mm]")
-ax3.set_title("Rising N2O liquid level in the rocket tank")
-ax3.grid(True, alpha=0.3)
-fig3.tight_layout(); fig3.savefig(OUTPUT_DIR / "fill_level.png", dpi=130)
+# ---- Figure 3: liquid-level and N2O-inventory dashboard ----
+fig3, axs3 = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+ax3_level, ax3_reserve, ax3_rocket = axs3
+ax3_level.plot(rec_t, rec_level * 1000.0, color="tab:blue")
+target_level = ROCKET_LIQUID_TARGET * ROCKET["H"]
+ax3_level.axhline(target_level * 1000.0, color="tab:red", linestyle="--",
+                  label=f"dip-tube tip ({ROCKET_ULLAGE_TARGET*100:.1f}% ullage)")
+ax3_level.set_ylabel("liquid level [mm]")
+ax3_level.set_title("Rocket-tank N2O liquid level")
+ax3_level.grid(True, alpha=0.3)
+ax3_level.legend()
+
+ax3_reserve.plot(rec_t, rec_reserve_mass, color="tab:orange")
+ax3_reserve.set_ylabel("N2O mass [kg]")
+ax3_reserve.set_title("Supply-bottle N2O mass")
+ax3_reserve.grid(True, alpha=0.3)
+
+ax3_rocket.plot(rec_t, rec_rocket_mass, color="tab:green")
+ax3_rocket.set_xlabel("time [s]")
+ax3_rocket.set_ylabel("N2O mass [kg]")
+ax3_rocket.set_title("Rocket-tank N2O mass")
+ax3_rocket.grid(True, alpha=0.3)
+
+fig3.suptitle("N2O fill level and tank inventories")
+fig3.tight_layout(rect=[0, 0, 1, 0.97])
+fig3.savefig(OUTPUT_DIR / "fill_level.png", dpi=130)
 
 # ---- Figure 4: valve mass flows ----
 rec_mdot_valve = [np.asarray(mdot_series, dtype=float) for mdot_series in rec_mdot_valve]
