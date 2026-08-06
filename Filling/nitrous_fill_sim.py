@@ -59,17 +59,25 @@ P_ATM = 1.0e5                    # [Pa]  initial air pressure in line & rocket t
 
 # ---- Simulation control -------------------------------------------------------------
 # STABILITY / PERFORMANCE NOTE:
-#   Explicit Euler on compressible flow in small volumes is only conditionally stable.
-#   The shortest pipe control volume normally sets the limiting time scale.  If you
-#   see "NUMERICAL INSTABILITY", NaNs, or wild oscillations, reduce DT.
-#   Runtime scales with steps AND with how many valves pass two-phase N2O (the HEM
-#   flash is the cost).  ~4 ms/step here -> a few minutes for tens of thousands of
-#   steps.  Filling to a high level is a multi-second physical process for small
-#   orifices; enlarge d_orifice or accept longer runs.
+#   Each step is advanced with an embedded Euler/Heun (RK1/RK2) pair; the gap between
+#   the two estimates drives an adaptive step size, so DT_INIT only sets the very first
+#   trial step.  If the controller still can't converge within MAX_RETRIES, or you see
+#   "NUMERICAL INSTABILITY", tighten RTOL/ATOL_* or lower DT_MAX.
+#   Runtime scales with accepted+rejected steps AND with how many valves pass two-phase
+#   N2O (the HEM flash is the cost) -- most of that cost now falls only in transients.
 T_TOTAL = 20.0                  # [s]   total simulated time (+ 10.0 s extension when STOP_ON_ROCKET_FILL enabled)
-DT      = 2.0e-4                # [s]   Euler time step
-RECORD_EVERY = 20             # store/plot every N-th step (keeps memory reasonable)
-PRINT_EVERY = 1000    # print terminal time every N-th step (set to 1 for every step)
+
+DT_INIT = 2.0e-4                # [s]   initial trial step size
+DT_MAX  = 0.1                   # [s]   hard ceiling on the adaptive step size
+DT_MIN  = 1.0e-7                # [s]   hard floor / stuck-controller guard
+RTOL    = 1.0e-3                # [-]   relative error tolerance (shared)
+ATOL_M  = 1.0e-9                # [kg]  absolute error tolerance for mN2O, mair
+ATOL_U  = 1.0e-2                # [J]   absolute error tolerance for U
+SAFETY  = 0.9                   # [-]   step-size controller safety factor
+GROW_MAX, SHRINK_MIN = 1.5, 0.2 # [-]   per-step growth/shrink limits
+MAX_RETRIES = 20                # max step-halvings before giving up on one step
+
+PRINT_EVERY = 20      # print terminal time every N-th ACCEPTED step (set to 1 for every step)
 
 # ---- Branch-flow numerical relaxation ----------------------------------------------
 # First-order damping of jumps in the quasi-steady branch-flow solutions.  This is a
@@ -108,12 +116,13 @@ PIPES = [
 #  Each valve is a zero-volume orifice between adjacent control volumes.
 #  Kv  = valve flow coefficient (metric units, m^3/h at 1 bar) -> used as a single-phase limit.
 #  Cd  = orifice discharge coefficient (dimensionless, ~0.6-0.85).
+#  t_actuat = time [s] for the valve to travel fully closed<->open (same rate both ways).
 VALVES = [
-    dict(Kv=3.00, d_orifice=0.0100, Cd=0.80),  # valve1
-    dict(Kv=1.50, d_orifice=0.0100, Cd=0.65),  # valve2
-    dict(Kv=2.00, d_orifice=0.0100, Cd=0.80),  # valve3
-    dict(Kv=1.60, d_orifice=0.0100, Cd=0.80),  # valve4
-    dict(Kv=0.50, d_orifice=0.0020, Cd=0.60),  # valve5
+    dict(Kv=3.00, d_orifice=0.0100, Cd=0.80, t_actuat=0.1),  # valve1
+    dict(Kv=1.50, d_orifice=0.0100, Cd=0.65, t_actuat=0.1),  # valve2
+    dict(Kv=2.00, d_orifice=0.0100, Cd=0.80, t_actuat=0.1),  # valve3
+    dict(Kv=1.60, d_orifice=0.0100, Cd=0.80, t_actuat=0.1),  # valve4
+    dict(Kv=0.50, d_orifice=0.0020, Cd=0.60, t_actuat=0.1),  # valve5
 ]
 
 # ---- Valve schedules ----------------------------------------------------------------
@@ -557,16 +566,17 @@ def friction_flow(b, si, sj):
     return mdot if dP > 0 else -mdot
 
 
-def orifice_flow(b, si, sj, valve_open):
+def orifice_flow(b, si, sj, valve_pos):
     """
     Valve orifice flow (i->j positive).  Returns (mdot, choked_flag).
     Uses HEM for N2O-dominated upstream, ideal-gas nozzle for air-dominated upstream,
-    limited by the valve Kv.  Handles both flow directions.
+    limited by the valve Kv.  Handles both flow directions.  valve_pos in [0,1]
+    scales the effective throat area and Kv (0 = closed, 1 = fully open).
     """
-    if not valve_open:
+    if valve_pos <= 0.0:
         return 0.0, False
     v = VALVES[b["valve"]]
-    A = np.pi / 4.0 * v["d_orifice"] ** 2
+    A = np.pi / 4.0 * v["d_orifice"] ** 2 * valve_pos
     Cd = v["Cd"]
 
     Pi, Pj = si["P"], sj["P"]
@@ -586,7 +596,7 @@ def orifice_flow(b, si, sj, valve_open):
         G, choked = gas_mass_flux(up, P_dn)
 
     mdot = Cd * A * G
-    kv = v.get("Kv", v.get("Cv", 0.0))
+    kv = v.get("Kv", v.get("Cv", 0.0)) * valve_pos
     mdot = min(mdot, kv_limit(kv, abs(P_up - P_dn), up["rho"]))
     # The valve branch also carries the resistance of the adjacent pipe halves.
     # Keep that resistance after removing the artificial valve-section volumes.
@@ -664,12 +674,42 @@ def kv_limit(Kv, dP, rho):
 #  6.  VALVE SCHEDULE
 # =====================================================================================
 
+def _slew(pos, target, dt, t_actuat):
+    """Move pos toward target at constant rate 1/t_actuat over dt seconds."""
+    if dt <= 0.0:
+        return pos
+    if t_actuat <= 0.0:
+        return target
+    max_delta = dt / t_actuat
+    delta = target - pos
+    if abs(delta) <= max_delta:
+        return target
+    return pos + max_delta * (1.0 if delta > 0.0 else -1.0)
+
+
+def valve_position(vidx, t):
+    """Rate-limited valve position in [0,1].  Tracks the commanded (0/1) state
+       from VALVE_SCHEDULE, moving at constant rate 1/t_actuat so both
+       closed->open and open->closed transitions take t_actuat seconds -- a
+       command that reverses direction mid-travel ramps from wherever the
+       valve currently is, rather than resetting."""
+    t_actuat = VALVES[vidx].get("t_actuat", 0.0)
+    sched = VALVE_SCHEDULE[vidx]
+    pos = 0.0
+    target = 0.0
+    t_prev = sched[0][0] if sched else 0.0
+    for (ts, s) in sched:
+        if ts > t:
+            break
+        pos = _slew(pos, target, ts - t_prev, t_actuat)
+        t_prev = ts
+        target = float(s)
+    pos = _slew(pos, target, t - t_prev, t_actuat)
+    return pos
+
+
 def valve_is_open(vidx, t):
-    state = 0
-    for (ts, s) in VALVE_SCHEDULE[vidx]:
-        if t >= ts:
-            state = s
-    return bool(state)
+    return valve_position(vidx, t) > 0.0
 
 
 # =====================================================================================
@@ -716,12 +756,144 @@ print("Initial reserve state: "
       f"liquid volume={100.0*reserve_initial['V_liq']/Vr:.2f}%")
 
 # =====================================================================================
-#  8.  TIME INTEGRATION  (explicit Euler)
+#  8.  TIME INTEGRATION  (adaptive embedded Euler/Heun, explicit)
 # =====================================================================================
 
-nsteps = int(round(T_TOTAL / DT))
-print(f"Nodes: {N} | Branches: {len(branches)} | Steps: {nsteps} (dt={DT:g} s)")
-print("Running explicit-Euler integration ...")
+def compute_hydraulics(mN2O_v, mair_v, U_v, t):
+    """Evaluate node states and per-branch target flows.  Depends only on the state
+       and t, NOT on the trial step size, so it's safe/cheap to reuse across the
+       step-size controller's retries and across accepted steps (it's the expensive,
+       CoolProp/HEM-flash-bearing half of the derivative evaluation)."""
+    states = [node_state(mN2O_v[k], mair_v[k], U_v[k], nodes[k]["V"]) for k in range(N)]
+    binfo = []
+    for b in branches:
+        i, j = b["i"], b["j"]
+        si, sj = states[i], states[j]
+        if b["kind"] == "friction":
+            mdot_target, choked, valve_open = friction_flow(b, si, sj), False, True
+        else:
+            valve_pos = valve_position(b["valve"], t)
+            valve_open = valve_pos > 0.0
+            mdot_target, choked = orifice_flow(b, si, sj, valve_pos)
+
+        if b["kind"] == "orifice" and not valve_open:
+            binfo.append(dict(mdot_target=0.0, choked=False, valve_open=False, fwd=None, bwd=None))
+            continue
+
+        # Pre-compute the outlet composition for BOTH possible flow directions so the
+        # FLOW_TAU-filtered flow (only known once dt is chosen, in assemble_derivative)
+        # can pick whichever port its own sign indicates -- same as the single-pass
+        # original code, which always resolved the port after filtering.
+        _, fNf, fAf, hf, availNf, availAf, _ = outlet_stream(si, i, b)
+        _, fNb, fAb, hb, availNb, availAb, _ = outlet_stream(sj, j, b)
+        binfo.append(dict(
+            mdot_target=mdot_target, choked=choked, valve_open=valve_open,
+            fwd=dict(fN=fNf, fA=fAf, h=hf, availN=availNf, availA=availAf),
+            bwd=dict(fN=fNb, fA=fAb, h=hb, availN=availNb, availA=availAb),
+        ))
+    return states, binfo
+
+
+def assemble_derivative(binfo, mdot_prev, dt):
+    """Apply the FLOW_TAU relaxation to each branch's target flow at trial step dt and
+       assemble the state derivative.  Cheap arithmetic only -- safe to redo per retry."""
+    dmN2O = np.zeros(N)
+    dmair = np.zeros(N)
+    dU    = np.zeros(N)
+    valve_mdot = [0.0] * 5
+    mdot_new = np.zeros(len(branches))
+
+    for bi, b in enumerate(branches):
+        info = binfo[bi]
+        if b["kind"] == "orifice" and not info["valve_open"]:
+            mdot_new[bi] = 0.0
+            valve_mdot[b["valve"]] = 0.0
+            continue
+
+        mdot_target = info["mdot_target"]
+        if FLOW_TAU > 0.0:
+            alpha = dt / (FLOW_TAU + dt)
+            mdot = mdot_prev[bi] + alpha * (mdot_target - mdot_prev[bi])
+        else:
+            mdot = mdot_target
+        mdot_new[bi] = mdot
+
+        if mdot == 0.0:
+            if b["kind"] == "orifice":
+                valve_mdot[b["valve"]] = 0.0
+            continue
+
+        port = info["fwd"] if mdot > 0.0 else info["bwd"]
+        sgn = 1.0 if mdot > 0.0 else -1.0
+        m_up = abs(mdot)
+        mN = m_up * port["fN"]
+        mA = m_up * port["fA"]
+        i, j = b["i"], b["j"]
+        dmN2O[i] -= sgn * mN
+        dmN2O[j] += sgn * mN
+        dmair[i] -= sgn * mA
+        dmair[j] += sgn * mA
+        dU[i]    -= sgn * m_up * port["h"]
+        dU[j]    += sgn * m_up * port["h"]
+        if b["kind"] == "orifice":
+            valve_mdot[b["valve"]] = sgn * m_up
+
+    return dmN2O, dmair, dU, mdot_new, valve_mdot
+
+
+def maxdrain_dt_cap(binfo):
+    """Largest dt such that no branch would drain more than MAX_DRAIN of its upstream
+       port's available species mass, using the (dt-independent) target flow rate as
+       the rate estimate.  A step-size bound, not a post-hoc flow clamp -- clamping the
+       flow after the fact would silently invalidate the Euler/Heun error estimate."""
+    cap = np.inf
+    for info in binfo:
+        mdot_target = info["mdot_target"]
+        if mdot_target == 0.0 or info["fwd"] is None:
+            continue
+        port = info["fwd"] if mdot_target > 0.0 else info["bwd"]
+        rate = abs(mdot_target)
+        if port["fN"] > 0.0 and port["availN"] > 0.0:
+            cap = min(cap, MAX_DRAIN * port["availN"] / (port["fN"] * rate))
+        if port["fA"] > 0.0 and port["availA"] > 0.0:
+            cap = min(cap, MAX_DRAIN * port["availA"] / (port["fA"] * rate))
+    return cap
+
+
+def next_event_time(t, fill_reach_time):
+    """Nearest future instant a step must not step over: valve-schedule changes
+       (including ones appended dynamically by STOP_ON_ROCKET_FILL), the instant
+       each resulting position ramp saturates (exact when a ramp starts from the
+       opposite extreme; approximate otherwise, which the error controller still
+       handles correctly), the post-fill stop, and the run's final time."""
+    candidates = [T_TOTAL]
+    for vidx, sched in enumerate(VALVE_SCHEDULE):
+        t_actuat = VALVES[vidx].get("t_actuat", 0.0)
+        for ts, _ in sched:
+            if ts > t + 1e-12:
+                candidates.append(ts)
+            if t_actuat > 0.0 and ts + t_actuat > t + 1e-12:
+                candidates.append(ts + t_actuat)
+    if fill_reach_time is not None:
+        candidates.append(fill_reach_time + 10.0)
+    return min(candidates)
+
+
+def error_norm(mN2O1, mair1, U1, mN2O2, mair2, U2):
+    """Weighted-RMS local error between the Euler (1) and Heun (2) estimates."""
+    y1 = np.concatenate([mN2O1, mair1, U1])
+    y2 = np.concatenate([mN2O2, mair2, U2])
+    atol = np.concatenate([np.full(N, ATOL_M), np.full(N, ATOL_M), np.full(N, ATOL_U)])
+    scale = atol + RTOL * np.maximum(np.abs(y1), np.abs(y2))
+    return float(np.sqrt(np.mean(((y2 - y1) / scale) ** 2)))
+
+
+def _step_factor(err, lo, hi):
+    return float(np.clip(SAFETY * max(err, 1e-12) ** -0.5, lo, hi))
+
+
+print(f"Nodes: {N} | Branches: {len(branches)}")
+print("Running adaptive Euler/Heun integration ...")
 
 # recording arrays
 rec_t = []
@@ -733,164 +905,135 @@ rec_rocket_mass = []
 rec_mdot_valve = [[] for _ in range(5)]
 choke_events = []            # (t, valve_idx) onset events
 choke_active = [False] * 5   # current choke state per valve (for edge detection)
-choke_steps  = [0] * 5       # number of recorded steps each valve was choked
+choke_time   = [0.0] * 5     # accumulated simulated time each valve was choked
 choke_first  = [None] * 5    # first time each valve choked
-branch_mdot_prev = np.zeros(len(branches))  # flow actually used on the prior step
+branch_mdot_prev = np.zeros(len(branches))  # FLOW_TAU-filtered flow, carried between steps
 
-# map orifice branch index -> valve number
-orifice_branches = {b["valve"]: bi for bi, b in enumerate(branches) if b["kind"] == "orifice"}
 
-for step in range(nsteps + 1):
-    t = step * DT
-    # terminal progress counter: updates the same line with current simulated time
-    if PRINT_EVERY and (step % max(1, PRINT_EVERY) == 0):
-        print(f"\rSim time: {t:8.4f} s", end='', flush=True)
+def record(t, states, valve_mdot):
+    rec_t.append(t)
+    rec_P.append([s["P"] for s in states])
+    rec_T.append([s["T"] for s in states])
+    rec_level.append(states[i_rocket]["V_liq"] / nodes[i_rocket]["A_cross"])
+    rec_reserve_mass.append(mN2O[i_reserve])
+    rec_rocket_mass.append(mN2O[i_rocket])
+    for vi in range(5):
+        rec_mdot_valve[vi].append(valve_mdot[vi])
 
-    # monitor the sustained dip-tube fill condition
-    if step == 0:
-        _sustain_time = 0.0
 
-    # ---- evaluate all node states ----
-    states = [node_state(mN2O[k], mair[k], U[k], nodes[k]["V"]) for k in range(N)]
+t = 0.0
+dt_next = DT_INIT
+fill_reach_time = None
+_sustain_time = 0.0
+accepted_steps = 0
+rejected_steps = 0
 
-    # ---- evaluate all branch flows ----
-    dmN2O = np.zeros(N)
-    dmair = np.zeros(N)
-    dU    = np.zeros(N)
-    valve_mdot = [0.0] * 5
+states0, binfo0 = compute_hydraulics(mN2O, mair, U, t)
+record(t, states0, [0.0] * 5)
 
+while t < T_TOTAL - 1e-9:
+    t_event = next_event_time(t, fill_reach_time)
+    remaining = max(t_event - t, 1e-12)
+    dt_floor = min(DT_MIN, remaining)
+    dt_trial = min(dt_next, DT_MAX, maxdrain_dt_cap(binfo0), remaining)
+    dt_trial = max(dt_trial, dt_floor)
+
+    attempt = 0
+    err = 0.0
+    while True:
+        dmN2O1, dmair1, dU1, mdotfilt1, valve_mdot1 = assemble_derivative(binfo0, branch_mdot_prev, dt_trial)
+        mN2O_e = np.clip(mN2O + dt_trial * dmN2O1, M_FLOOR, None)
+        mair_e = np.clip(mair + dt_trial * dmair1, M_FLOOR, None)
+        U_e    = U + dt_trial * dU1
+
+        states1, binfo1 = compute_hydraulics(mN2O_e, mair_e, U_e, t + dt_trial)
+        dmN2O2, dmair2, dU2, mdotfilt2, valve_mdot2 = assemble_derivative(binfo1, branch_mdot_prev, dt_trial)
+
+        mN2O_h = mN2O + 0.5 * dt_trial * (dmN2O1 + dmN2O2)
+        mair_h = mair + 0.5 * dt_trial * (dmair1 + dmair2)
+        U_h    = U + 0.5 * dt_trial * (dU1 + dU2)
+
+        err = error_norm(mN2O_e, mair_e, U_e, mN2O_h, mair_h, U_h)
+        converged = err <= 1.0 or dt_trial <= dt_floor * (1.0 + 1e-9)
+        if converged or attempt >= MAX_RETRIES:
+            if not converged:
+                print(f"\n*** step-size controller could not converge at t={t:.6f}s after "
+                      f"{MAX_RETRIES} retries (err={err:.3g}). Continuing with the last trial step. ***")
+            break
+        rejected_steps += 1
+        attempt += 1
+        dt_trial = max(dt_trial * _step_factor(err, SHRINK_MIN, 0.9), dt_floor)
+
+    mN2O = np.clip(mN2O_h, M_FLOOR, None)
+    mair = np.clip(mair_h, M_FLOOR, None)
+    U    = U_h
+
+    if not (np.all(np.isfinite(mN2O)) and np.all(np.isfinite(mair)) and np.all(np.isfinite(U))):
+        print(f"\n*** NUMERICAL INSTABILITY at t={t:.5f}s. Tighten RTOL/ATOL_* or lower DT_MAX. ***")
+        break
+
+    branch_mdot_prev = mdotfilt1
+    accepted_steps += 1
+
+    # ---- choke bookkeeping, sampled once from k1 (the state at the START of this step) ----
     for bi, b in enumerate(branches):
-        i, j = b["i"], b["j"]
-        si, sj = states[i], states[j]
-        if b["kind"] == "friction":
-            mdot_target = friction_flow(b, si, sj)
-            choked = False
-            valve_open = True
-        else:
-            vidx = b["valve"]
-            valve_open = valve_is_open(vidx, t)
-            mdot_target, choked = orifice_flow(b, si, sj, valve_open)
-            if choked:
-                choke_steps[vidx] += 1
-                if choke_first[vidx] is None:
-                    choke_first[vidx] = t
-                    print(f"  [CHOKED]  valve{vidx+1} first choked at t = {t:8.4f} s "
-                          f"(P_up={si['P']/1e5:6.2f} bar -> P_dn={sj['P']/1e5:6.2f} bar)")
-                if not choke_active[vidx]:
-                    choke_events.append((t, vidx))
-                    choke_active[vidx] = True
-            else:
-                choke_active[vidx] = False
-
-        # Backward-Euler first-order filter.  A valve closure overrides the
-        # relaxation state so flow cannot persist through a closed valve.
-        if b["kind"] == "orifice" and not valve_open:
-            mdot = 0.0
-            branch_mdot_prev[bi] = 0.0
-        elif FLOW_TAU > 0.0:
-            alpha = DT / (FLOW_TAU + DT)
-            mdot = branch_mdot_prev[bi] + alpha * (mdot_target - branch_mdot_prev[bi])
-        else:
-            mdot = mdot_target
-
-        if mdot == 0.0:
-            branch_mdot_prev[bi] = 0.0
-            if b["kind"] == "orifice":
-                valve_mdot[b["valve"]] = 0.0
+        if b["kind"] != "orifice":
             continue
+        vidx = b["valve"]
+        info = binfo0[bi]
+        if info["choked"]:
+            choke_time[vidx] += dt_trial
+            if choke_first[vidx] is None:
+                choke_first[vidx] = t
+                si, sj = states0[b["i"]], states0[b["j"]]
+                print(f"  [CHOKED]  valve{vidx+1} first choked at t = {t:8.4f} s "
+                      f"(P_up={si['P']/1e5:6.2f} bar -> P_dn={sj['P']/1e5:6.2f} bar)")
+            if not choke_active[vidx]:
+                choke_events.append((t, vidx))
+                choke_active[vidx] = True
+        else:
+            choke_active[vidx] = False
 
-        # Select the phase exposed at the actual upstream port.  Tank ports are
-        # permanently configured as bottom outlets or as the rocket dip tube.
-        up_idx = i if mdot > 0 else j
-        up_bulk = si if mdot > 0 else sj
-        up, fN, fA, h_up, available_N, available_A, _stream_phase = \
-            outlet_stream(up_bulk, up_idx, b)
-        m_up = abs(mdot)
-        # Limit against the inventory of the selected phase, not the tank's bulk
-        # mass.  This prevents a liquid port from draining vapour or vice versa.
-        caps = []
-        if fN > 0.0:
-            caps.append(MAX_DRAIN * available_N / (fN * DT))
-        if fA > 0.0:
-            caps.append(MAX_DRAIN * available_A / (fA * DT))
-        if caps:
-            m_up = min(m_up, min(caps))
-        mN = m_up * fN
-        mA = m_up * fA
-        sgn = 1.0 if mdot > 0 else -1.0
-        actual_mdot = sgn * m_up
-        branch_mdot_prev[bi] = actual_mdot
-        if b["kind"] == "orifice":
-            valve_mdot[b["valve"]] = actual_mdot
+    t += dt_trial
+    # committed-state hydraulics: recorded now, and reused as next iteration's k1
+    states0, binfo0 = compute_hydraulics(mN2O, mair, U, t)
+    record(t, states0, valve_mdot1)
 
-        # apply to i (positive mdot leaves i) and j
-        dmN2O[i] -= sgn * mN
-        dmN2O[j] += sgn * mN
-        dmair[i] -= sgn * mA
-        dmair[j] += sgn * mA
-        dU[i]    -= sgn * m_up * h_up
-        dU[j]    += sgn * m_up * h_up
+    if PRINT_EVERY and (accepted_steps % max(1, PRINT_EVERY) == 0):
+        print(f"\rSim time: {t:8.4f} s  (dt={dt_trial:.2e} s, accepted={accepted_steps}, "
+              f"rejected={rejected_steps})", end='', flush=True)
 
-    # ---- record ----
-    if step % RECORD_EVERY == 0 or step == nsteps:
-        rec_t.append(t)
-        rec_P.append([s["P"] for s in states])
-        rec_T.append([s["T"] for s in states])
-        rec_level.append(states[i_rocket]["V_liq"] / nodes[i_rocket]["A_cross"])
-        rec_reserve_mass.append(mN2O[i_reserve])
-        rec_rocket_mass.append(mN2O[i_rocket])
-        for vi in range(5):
-            rec_mdot_valve[vi].append(valve_mdot[vi])
+    dt_next = np.clip(dt_trial * _step_factor(err, SHRINK_MIN, GROW_MAX), DT_MIN, DT_MAX)
 
     # Check whether the liquid has reached the dip-tube tip for 0.5 s.  The
     # annular tank has constant cross-sectional area, so height and volume
     # fractions are identical.
     if STOP_ON_ROCKET_FILL:
-        rocket_liq_frac = states[i_rocket]["V_liq"] / nodes[i_rocket]["V"]
+        rocket_liq_frac = states0[i_rocket]["V_liq"] / nodes[i_rocket]["V"]
         if rocket_liq_frac >= ROCKET_LIQUID_TARGET:
-            _sustain_time += DT
+            _sustain_time += dt_trial
         else:
             _sustain_time = 0.0
-        if _sustain_time >= 0.5:
+        if _sustain_time >= 0.5 and fill_reach_time is None:
             # Close valves 1-4 after the dip-tube level is sustained for 0.5s.
-            print(f"Rocket liquid reached the dip-tube tip "
+            print(f"\nRocket liquid reached the dip-tube tip "
                   f"({ROCKET_LIQUID_TARGET*100:.1f}% liquid, "
                   f"{ROCKET_ULLAGE_TARGET*100:.1f}% ullage) for "
                   f"{_sustain_time:.3f} s at t={t:.4f}s")
-            print(f"Closing valves 1-4, continuing simulation for 10 more seconds...")
+            print("Closing valves 1-4, continuing simulation for 10 more seconds...")
             # Dynamically add close events for valves 1-4 at current time
             for vi in range(4):
                 VALVE_SCHEDULE[vi].append((t, 0))
-            # Continue until 10 seconds after this point
             fill_reach_time = t
-            _sustain_time = 0.0  # Reset to prevent multiple triggers
-    else:
-        _sustain_time = 0.0
-    
+            _sustain_time = 0.0
+
     # Stop 10 seconds after rocket fill target is reached
-    if STOP_ON_ROCKET_FILL and hasattr(locals().get('fill_reach_time', None), '__float__'):
-        if t >= fill_reach_time + 10.0:
-            print(f"Stopping: 10 seconds elapsed after fill target reached at t={t:.4f}s")
-            break
-
-    if step == nsteps:
-        break
-
-    # ---- explicit Euler update ----
-    mN2O += DT * dmN2O
-    mair += DT * dmair
-    U    += DT * dU
-    np.clip(mN2O, M_FLOOR, None, out=mN2O)
-    np.clip(mair, M_FLOOR, None, out=mair)
-
-    # stability guard
-    if not np.all(np.isfinite(U)) or np.any(np.isfinite(U) == False):
-        print(f"\n*** NUMERICAL INSTABILITY at t={t:.5f}s (step {step}). "
-              f"Reduce DT and re-run. ***")
+    if fill_reach_time is not None and t >= fill_reach_time + 10.0 - 1e-9:
+        print(f"Stopping: 10 seconds elapsed after fill target reached at t={t:.4f}s")
         break
 
 print()
-print("Integration finished.")
+print(f"Integration finished. Accepted steps: {accepted_steps}, rejected attempts: {rejected_steps}.")
 
 # =====================================================================================
 #  9.  RESULTS  &  PLOTS
@@ -909,14 +1052,15 @@ plot_idx = [name.index(n) for n in plot_nodes]
 
 # ---- choke summary ----
 print("\n================ CHOKED-FLOW SUMMARY ================")
+total_time = rec_t[-1] if len(rec_t) else 0.0
 if not any(choke_first):
     print("No choked flow detected at any valve.")
 else:
     for vi in range(5):
         if choke_first[vi] is not None:
-            frac = 100.0 * choke_steps[vi] / max(nsteps, 1)
+            frac = 100.0 * choke_time[vi] / max(total_time, 1e-9)
             print(f"  valve{vi+1}: first choked at t={choke_first[vi]:.4f} s, "
-                  f"choked ~{frac:.1f}% of the run")
+                  f"choked ~{frac:.1f}% of the run (by time)")
         else:
             print(f"  valve{vi+1}: never choked")
 print("====================================================\n")
@@ -999,10 +1143,10 @@ fig4.tight_layout(rect=[0, 0, 1, 0.96])
 fig4.savefig(OUTPUT_DIR / "fill_valveflow.png", dpi=130)
 
 # ---- Figure 5: valve-position dashboard (0=closed, 1=open) ----
-rec_valve_pos = np.array([[1.0 if valve_is_open(vi, t) else 0.0 for t in rec_t] for vi in range(5)])
+rec_valve_pos = np.array([[valve_position(vi, t) for t in rec_t] for vi in range(5)])
 fig5, axs5 = plt.subplots(5, 1, figsize=(10, 10), sharex=True)
 for vi, ax in enumerate(axs5):
-    ax.step(rec_t, rec_valve_pos[vi, :], where="post", color=f"C{vi}")
+    ax.plot(rec_t, rec_valve_pos[vi, :], color=f"C{vi}")
     ax.set_ylabel("position")
     ax.set_title(f"Valve {vi+1}")
     ax.set_ylim(-0.1, 1.1)
